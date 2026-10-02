@@ -882,8 +882,9 @@ def scn_brain(brain: str = "", claude_key: str = "__keep__", openai_key: str = "
     if not nox_scenarios:
         return {"brain": "ollama"}
     cfg = nox_scenarios.load()
-    if brain in ("ollama", "claude", "openai"):
+    if brain in ("ollama", "claude", "claude_cli", "openai"):
         cfg["brain"] = brain
+        cfg["claude_cli_enabled"] = (brain == "claude_cli")   # CLI-подписка как основной мозг
     if claude_key != "__keep__":
         cfg["claude_key"] = claude_key
     if openai_key != "__keep__":

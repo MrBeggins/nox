@@ -904,10 +904,17 @@
             <div class="nx-row">
                 <select class="nx-in" bind:value={scnBrain} on:change={saveBrain}>
                     <option value="ollama">Ollama (локально, бесплатно)</option>
-                    <option value="claude">Claude API (точнее, нужен ключ)</option>
+                    <option value="claude_cli">Claude (моя подписка, без ключа)</option>
+                    <option value="claude">Claude API (нужен ключ)</option>
                     <option value="openai">ChatGPT API (нужен ключ)</option>
                 </select>
             </div>
+            {#if scnBrain === "claude_cli"}
+                <div class="nx-hint" style="margin-top:4px">
+                    Использует твою подписку через локальный Claude. Нужен разовый вход:
+                    запусти <b>claude-login.cmd</b> (в папке C:\jarvis-lab) и включи VPN. Токенов тратит мало.
+                </div>
+            {/if}
             {#if scnBrain === "claude"}
                 <div class="nx-row">
                     <input class="nx-in" type="password" placeholder={scnHasClaude ? "ключ сохранён — впиши, чтобы заменить" : "Anthropic API ключ (sk-ant-…)"} bind:value={claudeKey} />

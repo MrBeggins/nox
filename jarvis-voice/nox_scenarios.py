@@ -8,9 +8,11 @@
 - Сценарий: инструмент + событие + ветки с условиями (нет/диапазон/больше/меньше) -> координата.
 - Мозг (разбор NL и извлечение числа из новости): Ollama (по умолч.) / Claude API / OpenAI API.
 """
-import ctypes, time, threading, json, os, re, socket, base64, struct
+import ctypes, time, threading, json, os, re, socket, base64, struct, subprocess
 import urllib.request
 from ctypes import wintypes
+
+_CREATE_NO_WINDOW = 0x08000000  # не плодить консольные окна
 
 _user32 = ctypes.windll.user32
 MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -64,7 +66,8 @@ def start_capture():
         threading.Thread(target=_f2_loop, daemon=True).start()
 
 # ------------------------------------------------------------------ хранилище
-_DEF = {"brain": "ollama", "claude_key": "", "openai_key": "", "scenarios": []}
+_DEF = {"brain": "ollama", "claude_key": "", "openai_key": "",
+        "claude_cli_enabled": False, "claude_cli_model": "haiku", "scenarios": []}
 def load():
     try:
         d = json.load(open(STORE, encoding="utf-8"))
@@ -125,23 +128,55 @@ def _openai(system, user, max_tokens, key):
                    {"Content-Type": "application/json", "Authorization": "Bearer " + key})
     return r["choices"][0]["message"]["content"]
 
+# Claude через локальный CLI (ПОДПИСКА пользователя, без API-ключа). Нужен разовый `claude login`
+# (+ VPN из РФ). За ~минуты вокруг события расход токенов копеечный, качество выше Ollama.
+_CLAUDE_EXE = None
+def _claude_cli_bin():
+    global _CLAUDE_EXE
+    if _CLAUDE_EXE is not None:
+        return _CLAUDE_EXE
+    ad = os.environ.get("APPDATA", "")
+    cand = os.path.join(ad, "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe")
+    _CLAUDE_EXE = cand if os.path.exists(cand) else "claude"
+    return _CLAUDE_EXE
+
+def _claude_cli(system, user, max_tokens, model="haiku"):
+    p = subprocess.run(
+        [_claude_cli_bin(), "-p", user, "--append-system-prompt", system, "--model", (model or "haiku")],
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
+        creationflags=_CREATE_NO_WINDOW)
+    out = (p.stdout or "").strip()
+    if (not out) or ("Not logged in" in out) or ("Please run /login" in out):
+        raise RuntimeError("claude cli: " + (out or (p.stderr or "")[:120] or "empty"))
+    return out
+
 _force_claude_until = 0.0   # до этого времени (unix) в окне события предпочитаем Claude
 
 def _llm(system, user, max_tokens=120):
     cfg = load()
     b = cfg.get("brain", "ollama")
     key = cfg.get("claude_key")
-    # В окне ожидаемого события — Claude (точнее выбор стакана), если ключ есть; иначе обычный роутер.
-    if time.time() < _force_claude_until and key:
-        b = "claude"
-    try:
-        if b == "claude" and key:
-            return _claude(system, user, max_tokens, key)
-        if b == "openai" and cfg.get("openai_key"):
+    cli_on = (b == "claude_cli") or cfg.get("claude_cli_enabled", False)
+    model = cfg.get("claude_cli_model", "haiku")
+    in_window = time.time() < _force_claude_until
+    # Выбран Claude ИЛИ окно ожидаемого события -> пробуем Claude: сначала подписку (CLI), потом ключ.
+    if b in ("claude", "claude_cli") or in_window:
+        if cli_on:
+            try:
+                return _claude_cli(system, user, max_tokens, model)
+            except Exception:
+                pass
+        if key:
+            try:
+                return _claude(system, user, max_tokens, key)
+            except Exception:
+                pass
+    if b == "openai" and cfg.get("openai_key"):
+        try:
             return _openai(system, user, max_tokens, cfg["openai_key"])
-    except Exception:
-        pass  # при сбое платного API — падаем на Ollama
-    return _ollama(system, user, max_tokens)
+        except Exception:
+            pass
+    return _ollama(system, user, max_tokens)   # универсальный откат
 
 def _json_from(text):
     if not text:
@@ -298,11 +333,13 @@ def set_schedule(scenario_id, dt_str, prewarm_min=3):
     return {"ok": False, "text": "Такой сценарий не найден, сэр."}
 
 def _prime_claude(cfg):
-    key = cfg.get("claude_key")
-    if not key:
-        return
+    # прогрев соединения/сессии: подписка (CLI) или ключ
     try:
-        _claude("Ответь одним словом: готов", "прогрев", 5, key)
+        if cfg.get("brain") == "claude_cli" or cfg.get("claude_cli_enabled"):
+            _claude_cli("Ответь одним словом: готов", "прогрев", 5, cfg.get("claude_cli_model", "haiku"))
+            return
+        if cfg.get("claude_key"):
+            _claude("Ответь одним словом: готов", "прогрев", 5, cfg["claude_key"])
     except Exception:
         pass
 
