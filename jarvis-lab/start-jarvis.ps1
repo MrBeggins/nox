@@ -12,12 +12,14 @@ if (-not $oup) {
     }
 }
 
-# 1) Голосовой сервер F5 (если ещё не запущен на :8123)
+# 1) Голосовой сервер (:8123). Движок по tts_engine.txt: 'silero' (CPU-ноут) или 'f5' (GPU).
+$ttsScript = "tts_server.py"
+try { if ((Get-Content "C:\jarvis-voice\tts_engine.txt" -EA Stop).Trim().ToLower() -eq "silero") { $ttsScript = "tts_silero_server.py" } } catch {}
 $up = $false
 try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', 8123); $c.Close(); $up = $true } catch {}
 if (-not $up) {
-    Start-Process -FilePath "C:\jarvis-voice\.venv\Scripts\pythonw.exe" `
-        -ArgumentList "tts_server.py" `
+    Start-Process -FilePath "C:\jarvis-voice\.venv\Scripts\python.exe" `
+        -ArgumentList $ttsScript `
         -WorkingDirectory "C:\jarvis-voice" `
         -WindowStyle Hidden `
         -RedirectStandardOutput "C:\jarvis-voice\tts_out.log" `
@@ -69,6 +71,20 @@ if (-not $mup) {
         -WindowStyle Hidden `
         -RedirectStandardOutput "C:\jarvis-voice\mag_out.log" `
         -RedirectStandardError  "C:\jarvis-voice\mag_err.log"
+}
+
+# 2e) Макростатистика США: BLS (:8128) и BEA (:8129)
+foreach ($svc in @(@{p=8128;s="bls_reader.py";o="bls"}, @{p=8129;s="bea_reader.py";o="bea"})) {
+    $su = $false
+    try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', $svc.p); $c.Close(); $su = $true } catch {}
+    if (-not $su) {
+        Start-Process -FilePath "C:\jarvis-voice\.venv\Scripts\python.exe" `
+            -ArgumentList $svc.s `
+            -WorkingDirectory "C:\jarvis-voice" `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput "C:\jarvis-voice\$($svc.o)_out.log" `
+            -RedirectStandardError  "C:\jarvis-voice\$($svc.o)_err.log"
+    }
 }
 
 # 3) GUI (release — собран без консоли)
