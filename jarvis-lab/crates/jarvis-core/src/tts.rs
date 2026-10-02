@@ -142,8 +142,41 @@ pub fn speak_reply(text: &str) {
     speak_nfe(&joined, Some(14), Some(speed));
 }
 
+/// Порог (в символах), выше которого длинный ответ озвучивается ПО ПРЕДЛОЖЕНИЯМ —
+/// чтобы первое слово звучало через ~1.5с, а не после синтеза всего текста.
+const STREAM_THRESHOLD: usize = 160;
+
+/// Разбить текст на предложения (по . ! ? … и переносам), склеивая слишком короткие
+/// куски со следующим, чтобы не было рубленых обрывков.
+fn split_sentences(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in text.chars() {
+        cur.push(ch);
+        if matches!(ch, '.' | '!' | '?' | '…' | '\n') {
+            let t = cur.trim();
+            // не дробить на инициалах/сокращениях — копим, пока кусок слишком мал
+            if t.chars().count() >= 12 {
+                out.push(t.to_string());
+                cur.clear();
+            }
+        }
+    }
+    let tail = cur.trim();
+    if !tail.is_empty() {
+        if let Some(last) = out.last_mut() {
+            if tail.chars().count() < 12 { last.push(' '); last.push_str(tail); }
+            else { out.push(tail.to_string()); }
+        } else {
+            out.push(tail.to_string());
+        }
+    }
+    out
+}
+
 /// Speak with an optional explicit nfe_step (None = server default ~14) и
-/// опциональной скоростью речи (None = серверная по умолчанию 1.2).
+/// опциональной скоростью речи. Длинный текст озвучивается по предложениям
+/// (первое слово — быстро); короткий — одним куском (как раньше).
 pub fn speak_nfe(text: &str, nfe: Option<u32>, speed: Option<f32>) {
     if !enabled() {
         return;
@@ -152,7 +185,21 @@ pub fn speak_nfe(text: &str, nfe: Option<u32>, speed: Option<f32>) {
     if text.is_empty() {
         return;
     }
+    if text.chars().count() > STREAM_THRESHOLD {
+        for sent in split_sentences(text) {
+            speak_piece(&sent, nfe, speed);
+        }
+        return;
+    }
+    speak_piece(text, nfe, speed);
+}
 
+/// Синтез+воспроизведение одного куска текста (F5, с откатом на Pavel).
+fn speak_piece(text: &str, nfe: Option<u32>, speed: Option<f32>) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
     let tmp = std::env::temp_dir();
 
     // Text to speak (UTF-8 temp file).
