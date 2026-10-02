@@ -193,45 +193,84 @@ _PARSE_SYS = (
     "Формат: {\"instrument\":\"<бумага>\",\"event\":\"<событие, одно слово>\",\"branches\":["
     "{\"type\":\"none|range|gt|lt|any\",\"min\":число|null,\"max\":число|null,\"label\":\"<куда>\"}]}\n"
     "type: none — события/выплаты нет; range — min..max; gt — больше min; lt — меньше max; any — любое.\n"
-    "Пример: «Новатэк дивиденды: нет -> стакан 1; 1-30 руб -> стакан 2; больше 30 -> стакан 3» ->\n"
+    "event — это НАЗВАНИЕ показателя (дивиденд, нонфарм, ставка), НЕ дата и НЕ число.\n"
+    "Числа — БЕЗ единиц (к/тыс/млн/руб/%): «99к»->99, «от 75к до 99к»-> min 75 max 99.\n"
+    "gt (больше X): порог в min, max=null. lt (меньше X): порог в max, min=null.\n"
+    "Если для условия действие НЕ нужно — label = \"без действий\".\n"
+    "Пример1: «Новатэк дивиденды: нет -> стакан 1; 1-30 руб -> стакан 2; больше 30 -> стакан 3» ->\n"
     "{\"instrument\":\"новатэк\",\"event\":\"дивиденд\",\"branches\":["
     "{\"type\":\"none\",\"min\":null,\"max\":null,\"label\":\"стакан 1\"},"
     "{\"type\":\"range\",\"min\":1,\"max\":30,\"label\":\"стакан 2\"},"
-    "{\"type\":\"gt\",\"min\":30,\"max\":null,\"label\":\"стакан 3\"}]}"
+    "{\"type\":\"gt\",\"min\":30,\"max\":null,\"label\":\"стакан 3\"}]}\n"
+    "Пример2: «нонфарм: больше 99к -> сценарий 1; меньше 75 -> сценарий 2; 75-99к -> без действий» ->\n"
+    "{\"instrument\":\"нонфарм\",\"event\":\"нонфарм\",\"branches\":["
+    "{\"type\":\"gt\",\"min\":99,\"max\":null,\"label\":\"сценарий 1\"},"
+    "{\"type\":\"lt\",\"min\":null,\"max\":75,\"label\":\"сценарий 2\"},"
+    "{\"type\":\"range\",\"min\":75,\"max\":99,\"label\":\"без действий\"}]}"
 )
+_DATE_RE = re.compile(r"\b\d{1,2}[.]\d{1,2}(?:[.]\d{2,4})?(?:\s+\d{1,2}:\d{2})?\b")
+
 def parse_scenario(text):
-    out = _json_from(_llm(_PARSE_SYS, text, max_tokens=300))
+    # дату/время убираем из текста ДО разбора (иначе модель путает её с событием);
+    # если дата со временем — вернём её отдельно как schedule_dt (для поля «ожидается»).
+    sched = None
+    md = re.search(r"(\d{1,2})[.](\d{1,2})[.](\d{2,4})(?:\s+(\d{1,2}):(\d{2}))?", text)
+    if md:
+        dd, mo, yy = md.group(1), md.group(2), md.group(3)
+        yy = ("20" + yy) if len(yy) == 2 else yy
+        if md.group(4):
+            sched = f"{yy}-{int(mo):02d}-{int(dd):02d} {int(md.group(4)):02d}:{md.group(5)}"
+    clean = _DATE_RE.sub(" ", text)
+    out = _json_from(_llm(_PARSE_SYS, clean, max_tokens=300))
     if not out or "branches" not in out:
         return None
     out["instrument"] = str(out.get("instrument", "")).lower().strip()
-    out["event"] = str(out.get("event", "")).lower().strip()
+    ev = str(out.get("event", "")).lower().strip()
+    # event не должен быть датой/числом -> откат на инструмент
+    if (not ev) or re.fullmatch(r"[\d.\s:–-]+", ev):
+        ev = out["instrument"]
+    out["event"] = ev
+    if sched:
+        out["schedule_dt"] = sched
     for b in out["branches"]:
         b["label"] = b.get("label") or b.get("minLabel") or b.get("maxLabel") or "стакан"
         b.pop("minLabel", None); b.pop("maxLabel", None)
         b.setdefault("x", None); b.setdefault("y", None)
+        # канонизация порогов: gt -> в min, lt -> в max
+        t, mn, mx = b.get("type"), b.get("min"), b.get("max")
+        if t == "gt" and mn is None and mx is not None:
+            b["min"], b["max"] = mx, None
+        if t == "lt" and mx is None and mn is not None:
+            b["min"], b["max"] = None, mn
+        lab = (b["label"] or "").lower()
+        b["noop"] = any(k in lab for k in ("без действ", "ничего", "пропуск", "не трог", "skip"))
     return out
 
 # ------------------------------------------------------------------ извлечение значения из новости
 # Возвращаем ОДНО число: >0 размер; 0 — события/выплаты нет; None — размер не назван (неоднозначно).
 _EXTRACT_SYS_TMPL = (
-    "Извлеки размер события «{ev}» из новости. Ответь РОВНО одним числом, без слов:\n"
-    "- размер в рублях, если он указан (например 35)\n"
-    "- 0 — если выплаты/события нет (отказ, не выплачивать, отменили, не рекомендовал)\n"
-    "- -1 — если событие есть, но конкретный размер не назван\n"
+    "Из новости про «{ev}» извлеки главное число. Ответь РОВНО одним числом, без слов и единиц.\n"
+    "Правила:\n"
+    "- верни САМО число как в тексте, ОТБРОСив единицы (руб, %, тыс/тысяч/к, млн, млрд): "
+    "«180 тысяч»->180, «35 рублей»->35, «21 процент»->21, «3 млрд»->3, «минус 20 тысяч»->-20\n"
+    "- 0 — если события/выплаты нет (отказ, не выплачивать, отменили)\n"
+    "- NA — если событие есть, но число не названо\n"
     "Примеры:\n"
-    "«Совет директоров рекомендовал дивиденды 35 рублей на акцию» => 35\n"
-    "«дивиденды 20 руб на акцию» => 20\n"
+    "«дивиденды 35 рублей на акцию» => 35\n"
+    "«нонфарм вырос на 180 тысяч» => 180\n"
+    "«ЦБ повысил ключевую ставку до 21 процента» => 21\n"
+    "«Минфин купит валюту на 50 млрд рублей» => 50\n"
     "«рекомендовал не выплачивать дивиденды» => 0\n"
-    "«отказались от дивидендов» => 0\n"
-    "«совет директоров обсудит дивиденды в пятницу» => -1"
+    "«совет директоров обсудит вопрос в пятницу» => NA"
 )
 def _extract_value(news_text, event):
-    raw = _llm(_EXTRACT_SYS_TMPL.format(ev=event), news_text, max_tokens=12) or ""
+    raw = (_llm(_EXTRACT_SYS_TMPL.format(ev=event), news_text, max_tokens=12) or "").strip()
+    if ("na" in raw.lower()) and not re.search(r"\d", raw):
+        return None   # число не названо
     m = re.search(r"-?\d+(?:[.,]\d+)?", raw)
     if not m:
         return None
-    v = float(m.group(0).replace(",", "."))
-    return None if v == -1 else v   # -1 -> неоднозначно (None)
+    return float(m.group(0).replace(",", "."))
 
 def _branch_match(b, val):
     t = b.get("type")
@@ -265,8 +304,9 @@ def on_news(items):
         if not sc.get("enabled"):
             continue
         branches = sc.get("branches", [])
-        if not branches or any(b.get("x") is None for b in branches):
-            continue  # координаты не заданы
+        # координаты нужны только для веток с действием (noop — без клика)
+        if not branches or any(b.get("x") is None for b in branches if not b.get("noop")):
+            continue
         if time.time() - sc.get("fired_ts", 0) < _COOLDOWN:
             continue
         inst = (sc.get("instrument") or "").lower()
@@ -282,12 +322,15 @@ def on_news(items):
             branch = next((b for b in branches if _branch_match(b, val)), None)
             if not branch:
                 continue
-            click_at(branch["x"], branch["y"])
             sc["fired_ts"] = time.time(); changed = True
             vtxt = ("нет" if val == 0 else "не указан" if val is None
                     else (str(int(val)) if val == int(val) else str(val)))
-            _announce(f"Сценарий {sc.get('name','')}: открыл {branch.get('label','стакан')}. "
-                      f"{ev} {vtxt}. Проверьте и жмите, сэр.")
+            if branch.get("noop"):
+                _announce(f"{ev} {vtxt} — в заданном диапазоне, действий не требуется, сэр.")
+            else:
+                click_at(branch["x"], branch["y"])
+                _announce(f"Сценарий {sc.get('name','')}: открыл {branch.get('label','стакан')}. "
+                          f"{ev} {vtxt}. Проверьте и жмите, сэр.")
             break
     if changed:
         save(cfg)

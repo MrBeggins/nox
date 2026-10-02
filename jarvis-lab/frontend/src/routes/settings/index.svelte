@@ -845,7 +845,7 @@
         <div class="nx-block">
             <label class="nx-lab">Авто-клик стакана по новости</label>
             <p class="nx-desc">Опиши правило словами — Nox по нужной новости сам откроет заготовленный стакан (клик по координате). Купить/Продать жмёшь ты. Пример: «Новатэк дивиденды: нет → стакан 1; от 1 до 30 рублей → стакан 2; больше 30 → стакан 3».</p>
-            <textarea class="nx-in" rows="2" placeholder="Новатэк дивиденды: нет стакан 1, 1-30 стакан 2, больше 30 стакан 3" bind:value={scnText}></textarea>
+            <textarea class="nx-in" rows="5" style="width:100%;min-height:120px;resize:vertical;line-height:1.4;font-size:14px" placeholder="Новатэк дивиденды: нет → стакан 1; 1-30 → стакан 2; больше 30 → стакан 3&#10;&#10;или: нонфарм 02.10.2026 — больше 99к → сценарий 1; меньше 75 → сценарий 2; 75-99к → без действий" bind:value={scnText}></textarea>
             <div class="nx-row">
                 <button class="nx-btn" on:click={doParse} disabled={!scnText.trim()}>Разобрать</button>
                 {#if scnMsg}<span class="nx-hint" style="margin:0">{scnMsg}</span>{/if}
