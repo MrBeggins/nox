@@ -429,6 +429,11 @@ def _monitor_loop():
         try:
             if _mon_enabled():
                 _check_calendar()
+                if _phase() == "fast":          # в окне релиза — активировать гонку источников в сценариях
+                    try:
+                        import nox_scenarios; nox_scenarios.arm_window(300)
+                    except Exception:
+                        pass
                 if time.time() - _state.get("last_poll", 0) >= _interval():
                     _api_poll()
                     _check_facts(announce=True)

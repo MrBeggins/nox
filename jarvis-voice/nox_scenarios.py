@@ -150,6 +150,16 @@ def warm_ollama():
     except Exception:
         pass
 
+_last_warm = 0.0
+def arm_window(seconds=360):
+    """Активировать окно ГОНКИ источников на N секунд (вызывают BLS/BEA в окне релиза) + прогрев.
+    Так US-события (нонфарм/CPI/ВВП/PCE) авто-получают гонку Ollama+Claude без ручной настройки."""
+    global _force_claude_until, _last_warm
+    _force_claude_until = max(_force_claude_until, time.time() + seconds)
+    if time.time() - _last_warm > 120:   # прогрев не чаще раза в 2 мин
+        _last_warm = time.time()
+        threading.Thread(target=warm_ollama, daemon=True).start()
+
 def _claude(system, user, max_tokens, key):
     r = _http_json("https://api.anthropic.com/v1/messages",
                    {"model": "claude-haiku-4-5-20251001", "max_tokens": max_tokens,
