@@ -1,0 +1,52 @@
+# ============ Nox .gitignore ============
+# Секреты и ключи (НИКОГДА не коммитить)
+jarvis-voice/bea_key.txt
+jarvis-voice/bls_key.txt
+jarvis-voice/nox_scenarios.json
+**/*.key
+**/*.env
+**/*secret*
+# app.db лежит в %APPDATA%\com.priler.jarvis, но на всякий случай:
+**/app.db
+
+# Python
+jarvis-voice/.venv/
+**/__pycache__/
+*.pyc
+
+# Runtime-состояние и флаги (генерируются на ходу)
+jarvis-voice/*_state.json
+jarvis-voice/*_mon_on.txt
+jarvis-voice/news_monitor_on.txt
+jarvis-voice/tts_speed.txt
+jarvis-voice/*_filter.json
+jarvis-voice/marker.txt
+
+# Профили браузеров (содержат логин-сессии/cookies — приватность!)
+jarvis-voice/yandex_jarvis/
+jarvis-voice/browser_profile/
+jarvis-voice/mind_profile/
+jarvis-voice/pw-browsers/
+
+# Логи и временные артефакты
+**/*.log
+jarvis-voice/*.wav
+jarvis-voice/compare/
+jarvis-voice/ffmpeg-shared/
+
+# Rust
+jarvis-lab/target/
+
+# Frontend
+jarvis-lab/frontend/node_modules/
+jarvis-lab/frontend/dist/
+
+# Крупные модели (качаются отдельно — см. README)
+jarvis-lab/resources/models/
+jarvis-lab/resources/vosk/
+jarvis-lab/target/release/resources/models/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store

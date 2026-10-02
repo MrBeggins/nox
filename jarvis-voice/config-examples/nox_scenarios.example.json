@@ -1,0 +1,7 @@
+{
+  "_comment": "Скопируйте в C:\\jarvis-voice\\nox_scenarios.json. Ключи оставьте пустыми, если мозг = ollama.",
+  "brain": "ollama",
+  "claude_key": "",
+  "openai_key": "",
+  "scenarios": []
+}
