@@ -100,6 +100,7 @@ propcache==0.5.2
 proto-plus==1.28.4
 protobuf==7.36.1
 psutil==7.2.2
+pyaes==1.6.1
 pyarrow==25.0.1
 pyasn1==0.6.4
 pyasn1_modules==0.4.2
@@ -123,6 +124,7 @@ requests==2.34.2
 requests-toolbelt==1.0.0
 rich==13.9.4
 rjieba==0.2.1
+rsa==4.9.1
 ruaccent==1.5.8.3
 s3transfer==0.19.2
 safehttpx==0.1.7
@@ -137,6 +139,7 @@ soundfile==0.14.0
 soxr==1.1.0
 starlette==1.6.0
 sympy==1.14.0
+Telethon==1.45.0
 threadpoolctl==3.6.0
 tokenizers==0.23.2
 tomli==2.4.1

@@ -158,3 +158,45 @@ pub fn tts_speed_get() -> Result<String, String> { tget("/speed", &[]) }
 
 #[tauri::command]
 pub fn tts_speed_set(v: f64) -> Result<String, String> { tget("/set_speed", &[("v", &v.to_string())]) }
+
+// ---- Telegram reader (:8131) ----
+const TG: &str = "http://127.0.0.1:8131";
+
+fn gget(path: &str, query: &[(&str, &str)]) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build().map_err(|e| e.to_string())?;
+    let url = reqwest::Url::parse_with_params(&format!("{}{}", TG, path), query)
+        .map_err(|e| e.to_string())?;
+    client.get(url).send().map_err(|e| format!("telegram offline: {e}"))?
+        .text().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn tg_health() -> Result<String, String> { gget("/health", &[]) }
+
+#[tauri::command]
+pub fn tg_dialogs() -> Result<String, String> { gget("/dialogs", &[("limit", "250")]) }
+
+#[tauri::command]
+pub fn tg_chats_set(ids: String) -> Result<String, String> { gget("/chats_set", &[("ids", &ids)]) }
+
+#[tauri::command]
+pub fn tg_filter_get() -> Result<String, String> { gget("/filter_get", &[]) }
+
+#[tauri::command]
+pub fn tg_filter_add(value: String) -> Result<String, String> { gget("/filter_add", &[("q", &value)]) }
+
+#[tauri::command]
+pub fn tg_filter_remove(value: String) -> Result<String, String> { gget("/filter_remove", &[("q", &value)]) }
+
+#[tauri::command]
+pub fn tg_filter_mode(mode: String) -> Result<String, String> { gget("/filter_mode", &[("mode", &mode)]) }
+
+#[tauri::command]
+pub fn tg_creds_set(api_id: String, api_hash: String) -> Result<String, String> {
+    gget("/creds_set", &[("api_id", &api_id), ("api_hash", &api_hash)])
+}
+
+#[tauri::command]
+pub fn tg_mon(on: i32) -> Result<String, String> { gget("/mon", &[("on", &on.to_string())]) }

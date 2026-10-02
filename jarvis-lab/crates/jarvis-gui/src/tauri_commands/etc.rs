@@ -20,6 +20,20 @@ taskkill /F /IM jarvis-app.exe; Start-Sleep -Seconds 1; taskkill /F /IM jarvis-g
     Ok(())
 }
 
+/// Разовый вход в Telegram: открыть ВИДИМОЕ окно консоли для ввода телефона и кода
+/// (это единственное место, где консоль нужна — для интерактивного ввода).
+#[tauri::command]
+pub fn tg_login() -> Result<(), String> {
+    let mut cmd = std::process::Command::new("cmd");
+    cmd.args([
+        "/c", "start", "Nox: vhod v Telegram",
+        r"C:\jarvis-voice\.venv\Scripts\python.exe",
+        r"C:\jarvis-voice\tg_login.py",
+    ]);
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Показать/скрыть оверлей-шар (окно label="overlay").
 #[tauri::command]
 pub fn set_overlay_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {

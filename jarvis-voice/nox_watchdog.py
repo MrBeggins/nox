@@ -99,7 +99,7 @@ def ensure_gui():
 # grace-таймеры: не считать сервис «мёртвым» сразу после запуска (модель/страница грузятся)
 _last_start = {}
 GRACE = {"tts": 70, "yandex": 25, "app": 20, "gui": 15, "ollama": 20,
-         "invest": 15, "terminal": 25, "magellan": 20, "bls": 15, "bea": 15, "default": 15}
+         "invest": 15, "terminal": 25, "magellan": 20, "bls": 15, "bea": 15, "tg": 15, "default": 15}
 
 def _grace_ok(key):
     return time.time() - _last_start.get(key, 0) > GRACE.get(key, GRACE["default"])
@@ -140,6 +140,7 @@ def _tick():
         ("magellan", lambda: ensure_py("magellan_reader.py", 8127, "mag", 20),  "Магеллан"),
         ("bls",      lambda: ensure_py("bls_reader.py", 8128, "bls", 15),       "статистика США"),
         ("bea",      lambda: ensure_py("bea_reader.py", 8129, "bea", 15),       "ВВП и PCE США"),
+        ("tg",       lambda: ensure_py("tg_reader.py", 8131, "tg", 15),         "Телеграм"),
         ("app",      lambda: ensure_app(),                                      "голосовой движок"),
         ("gui",      lambda: ensure_gui(),                                      "интерфейс"),
     ]

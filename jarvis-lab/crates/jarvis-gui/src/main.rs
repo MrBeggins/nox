@@ -144,6 +144,18 @@ fn main() {
             tauri_commands::magellan_pulse,
             tauri_commands::tts_speed_get,
             tauri_commands::tts_speed_set,
+
+            // Telegram
+            tauri_commands::tg_health,
+            tauri_commands::tg_dialogs,
+            tauri_commands::tg_chats_set,
+            tauri_commands::tg_filter_get,
+            tauri_commands::tg_filter_add,
+            tauri_commands::tg_filter_remove,
+            tauri_commands::tg_filter_mode,
+            tauri_commands::tg_creds_set,
+            tauri_commands::tg_mon,
+            tauri_commands::tg_login,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

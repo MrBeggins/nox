@@ -174,6 +174,30 @@
         catch (e) { magError = String(e) }
     }
 
+    // ### ТЕЛЕГРАМ
+    let tgHealth: any = { authorized: false, err: "" }
+    let tgDialogs: any[] = []
+    let tgKeywords: string[] = []
+    let tgMode = "any"
+    let tgApiId = ""
+    let tgApiHash = ""
+    let tgMon = true
+    let tgKwInput = ""
+    let tgMsg = ""
+    async function tgLoad() {
+        try { tgHealth = JSON.parse(await invoke<string>("tg_health")) } catch (e) { tgHealth = { authorized: false, err: "сервис офлайн" } }
+        try { const f = JSON.parse(await invoke<string>("tg_filter_get")); tgKeywords = f.keywords || []; tgMode = f.match || "any" } catch (e) {}
+        try { const m = JSON.parse(await invoke<string>("tg_mon", { on: -1 })); tgMon = !!m.on } catch (e) {}
+    }
+    async function tgSaveCreds() { try { await invoke("tg_creds_set", { apiId: tgApiId, apiHash: tgApiHash }); tgMsg = "Сохранено. Теперь «Войти в Телеграм»." } catch (e) { tgMsg = "Ошибка сохранения" } }
+    async function tgLogin() { try { await invoke("tg_login"); tgMsg = "Открыл окно входа — введи телефон и код, затем «Обновить список чатов»." } catch (e) { tgMsg = "Не смог открыть вход" } }
+    async function tgRefresh() { await tgLoad(); try { const d = JSON.parse(await invoke<string>("tg_dialogs")); tgDialogs = d.items || []; if (!d.ok && d.text) tgMsg = d.text } catch (e) { tgMsg = "Не смог получить чаты" } }
+    async function tgSaveChats() { const ids = tgDialogs.filter(c => c.selected).map(c => c.id).join(","); try { await invoke("tg_chats_set", { ids }); tgMsg = "Чаты сохранены." } catch (e) {} }
+    async function tgAddKw() { const v = tgKwInput.trim(); if (!v) return; try { const r = JSON.parse(await invoke<string>("tg_filter_add", { value: v })); tgKeywords = r.keywords || []; tgKwInput = "" } catch (e) {} }
+    async function tgRemoveKw(k: string) { try { const r = JSON.parse(await invoke<string>("tg_filter_remove", { value: k })); tgKeywords = r.keywords || [] } catch (e) {} }
+    async function tgSetMode(m: string) { tgMode = m; try { await invoke("tg_filter_mode", { mode: m }) } catch (e) {} }
+    async function tgToggleMon() { try { const r = JSON.parse(await invoke<string>("tg_mon", { on: tgMon ? 0 : 1 })); tgMon = !!r.on } catch (e) {} }
+
     // ### СЦЕНАРИИ (авто-клик стакана по новости)
     let scnList: any[] = []
     let scnBrain = "ollama"
@@ -400,6 +424,7 @@
         loadNews()
         loadMagellan()
         loadScn()
+        tgLoad()
         // load voices
         try {
             const voices = await invoke<VoiceConfig[]>("list_voices")
@@ -991,6 +1016,75 @@
             {/if}
             <p class="nx-hint">Ollama — бесплатно и локально. Claude/ChatGPT — точнее разбирают сложные формулировки, но нужен API-ключ (оплата по токенам). Ключи хранятся локально.</p>
         </div>
+    </Tabs.Tab>
+
+    <Tabs.Tab label="Телеграм" icon={Mix}>
+        <Space h="sm" />
+        <div class="nx-block">
+            <label class="nx-lab">Доступ к Телеграму<InfoDot text="Nox читает сообщения из ВЫБРАННЫХ тобой чатов/каналов твоего аккаунта и по фильтру слов озвучивает важное + может запускать сценарии. Только чтение — ничего не постит и не пишет. Нужен api_id/api_hash с my.telegram.org и разовый вход (телефон + код)." /></label>
+            {#if tgHealth.authorized}
+                <p class="nx-hint" style="color:#7fd1a0">✓ Вход выполнен{tgHealth.me ? ` (${tgHealth.me})` : ""}</p>
+            {:else}
+                <p class="nx-hint" style="color:#e0a86a">Не подключено. {tgHealth.err || ""}</p>
+                <div class="nx-row">
+                    <input class="nx-in" placeholder="api_id" bind:value={tgApiId} />
+                    <input class="nx-in" placeholder="api_hash" bind:value={tgApiHash} />
+                    <button class="nx-btn" on:click={tgSaveCreds}>Сохранить</button>
+                </div>
+                <div class="nx-row">
+                    <button class="nx-btn" on:click={tgLogin}>Войти в Телеграм</button>
+                    <span class="nx-hint" style="margin:0">откроется окно для телефона и кода (разово)</span>
+                </div>
+                <p class="nx-hint">api_id и api_hash получаются на my.telegram.org → API development tools (бесплатно). Данные и код никуда не отправляются.</p>
+            {/if}
+            {#if tgMsg}<p class="nx-hint" style="color:#8ab4ff">{tgMsg}</p>{/if}
+        </div>
+
+        {#if tgHealth.authorized}
+        <div class="nx-block">
+            <label class="nx-lab">Чаты под наблюдением<InfoDot text="Нажми «Обновить список чатов», затем отметь чаты/каналы, сообщения из которых Nox будет отслеживать. Пусто — ни один (ничего не слушает). Не забудь «Сохранить выбор»." /></label>
+            <div class="nx-row">
+                <button class="nx-btn" on:click={tgRefresh}>Обновить список чатов</button>
+                <button class="nx-btn" on:click={tgSaveChats}>Сохранить выбор</button>
+            </div>
+            {#if tgDialogs.length}
+            <div style="max-height:240px;overflow:auto;margin-top:8px;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:6px">
+                {#each tgDialogs as c}
+                    <label class="nx-row" style="gap:8px;align-items:center;margin:2px 0;cursor:pointer">
+                        <input type="checkbox" bind:checked={c.selected} />
+                        <span style="color:#e9eef6">{c.name}</span>
+                        <span class="nx-hint" style="margin:0">{c.kind}</span>
+                    </label>
+                {/each}
+            </div>
+            {/if}
+        </div>
+
+        <div class="nx-block">
+            <label class="nx-lab">Фильтр по словам<InfoDot text="Озвучивать только сообщения, где встречаются эти слова (напр. «санкции», «дивиденды», тикер). Пусто — все сообщения из выбранных чатов. Режим «любое» — достаточно одного слова; «все» — должны встретиться все." /></label>
+            <div class="nx-row">
+                <input class="nx-in" placeholder="слово или фраза" bind:value={tgKwInput} on:keydown={(e) => e.key === 'Enter' && tgAddKw()} />
+                <button class="nx-btn" on:click={tgAddKw}>Добавить</button>
+                <select class="nx-in" style="max-width:120px" value={tgMode} on:change={(e) => tgSetMode(e.currentTarget.value)}>
+                    <option value="any">любое слово</option>
+                    <option value="all">все слова</option>
+                </select>
+            </div>
+            {#if tgKeywords.length}
+            <div class="nx-row" style="flex-wrap:wrap;gap:6px;margin-top:6px">
+                {#each tgKeywords as k}
+                    <span class="chip">{k}<button class="nx-clr" style="margin-left:4px" on:click={() => tgRemoveKw(k)}>✕</button></span>
+                {/each}
+            </div>
+            {/if}
+        </div>
+
+        <div class="nx-block">
+            <label class="nx-lab">Монитор Телеграма<InfoDot text="Общий выключатель слежки за Телеграмом: озвучка важных сообщений и запуск сценариев/разбора по ним." /></label>
+            <button class="nx-btn" on:click={tgToggleMon}>{tgMon ? "Выключить" : "Включить"}</button>
+            <span class="nx-hint" style="margin:0 0 0 8px">{tgMon ? "следит за выбранными чатами" : "выключен"}</span>
+        </div>
+        {/if}
     </Tabs.Tab>
 </Tabs>
 
