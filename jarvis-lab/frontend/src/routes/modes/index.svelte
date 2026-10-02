@@ -2,6 +2,7 @@
     import { onMount } from "svelte"
     import { invoke } from "@tauri-apps/api/core"
     import HDivider from "@/components/elements/HDivider.svelte"
+    import InfoDot from "@/components/elements/InfoDot.svelte"
     import { reloadSettings } from "@/stores"
 
     function applyLive() { try { reloadSettings() } catch (e) { console.error(e) } }
@@ -113,21 +114,21 @@
     {#if editing !== null || isNew}
         <div class="editor">
             <h3>{isNew ? "Новый режим" : `Редактирование: ${editing?.name}`}</h3>
-            <label>Название режима
+            <label>Название режима<InfoDot text="Профиль с набором настроек (имя-обращение, мозг, модель) под сценарий использования — например «Трейдинг», «Дом», «Игры». Переключаешь режим — меняется поведение целиком." />
                 <input bind:value={f_name} placeholder="Трейдинг / Дом / Игры" />
             </label>
-            <label>Имя-обращение (wake word)
+            <label>Имя-обращение (wake word)<InfoDot text="Слово активации для ЭТОГО режима. Напр. в «Трейдинге» — «джарвис», дома — «кит». Смена применяется после перезапуска ассистента." />
                 <input bind:value={f_wake} placeholder="джарвис / кит / петя" />
             </label>
             <div class="grid2">
-                <label>Мозг
+                <label>Мозг<InfoDot text="Какой мозг использует этот режим: локальная/OpenAI-совместимая, Claude или Авто. Позволяет в разных режимах разный мозг." />
                     <select bind:value={f_brain}>
                         <option value="openai">Локальная / OpenAI-совместимая</option>
                         <option value="claude">Claude</option>
                         <option value="auto">Авто</option>
                     </select>
                 </label>
-                <label>Модель (для локальной/OpenAI)
+                <label>Модель (для локальной/OpenAI)<InfoDot text="Имя модели для этого режима (напр. qwen2.5:3b — быстрее, 7b — умнее). Для Claude не используется." />
                     <input bind:value={f_model} placeholder="qwen2.5:7b / gpt-4o-mini" />
                 </label>
             </div>

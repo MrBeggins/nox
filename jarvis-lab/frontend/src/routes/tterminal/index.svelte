@@ -2,6 +2,7 @@
     import { onMount } from "svelte"
     import { invoke } from "@tauri-apps/api/core"
     import HDivider from "@/components/elements/HDivider.svelte"
+    import InfoDot from "@/components/elements/InfoDot.svelte"
 
     let url = ""
     let enabled = false
@@ -52,7 +53,7 @@
         </button>
     </div>
 
-    <label>Адрес терминала
+    <label>Адрес терминала<InfoDot text="Ссылка на веб-терминал T-Банка. По кнопке «Открыть терминал» Nox открывает его в своём окне браузера (отдельный профиль), откуда читает новости Trading Tools и календарь MindStocks." />
         <input bind:value={url} placeholder="https://www.tbank.ru/invest/terminal/" />
     </label>
     <div class="actions">
@@ -64,7 +65,7 @@
 
     <h3 style="margin:0 0 0.3rem;color:#cdeff0;font-size:0.95rem;">Чтение портфеля (Invest API)</h3>
     <p class="hint">Токен <b>«только чтение»</b> из T-Банка: Инвестиции → Токены Invest API → создать → режим «Только чтение». С ним Джарвис читает портфель и котировки голосом («джарвис, мой портфель», «курс сбера»). Сделки этим токеном невозможны.</p>
-    <label>Токен Invest API (только чтение)
+    <label>Токен Invest API (только чтение)<InfoDot text="Токен T-Инвест API в режиме «Только чтение» (T-Банк → Инвестиции → Токены Invest API). С ним Nox читает портфель и котировки голосом. ВАЖНО: токен «только чтение» — сделки им невозможны; Купить/Продать всегда жмёшь ты сам." />
         <input type="password" bind:value={token} placeholder="t...." />
     </label>
     <div class="actions">

@@ -2,6 +2,7 @@
     import { onMount } from "svelte"
     import { invoke } from "@tauri-apps/api/core"
     import HDivider from "@/components/elements/HDivider.svelte"
+    import InfoDot from "@/components/elements/InfoDot.svelte"
 
     // active backend
     let backend = "claude"
@@ -74,7 +75,7 @@
 
     <HDivider />
 
-    <h3>Активный мозг</h3>
+    <h3>Активный мозг<InfoDot text="Какой мозг отвечает на разговорные вопросы и команды ассистента. Claude — умнее, нужен вход+VPN. OpenAI-совместимая — ChatGPT по ключу ИЛИ локальная Ollama (бесплатно, офлайн). Авто — сначала дешёвая/локальная, при сбое Claude. (Это мозг ассистента; мозг сценариев настраивается отдельно во вкладке «Сценарии».)" /></h3>
     <div class="backends">
         <button class="be" class:sel={backend==='claude'} on:click={() => setBackend('claude')}>
             <div class="be-name">Claude</div>
@@ -98,13 +99,13 @@
         <button class="btn" on:click={usePresetLocal}>⚡ Локальная (Ollama)</button>
         <button class="btn" on:click={usePresetChatGPT}>☁ ChatGPT</button>
     </div>
-    <label>Базовый URL
+    <label>Базовый URL<InfoDot text="Адрес API модели. Локальная Ollama: http://127.0.0.1:11434/v1 (бесплатно, офлайн). ChatGPT: https://api.openai.com/v1 (нужен ключ). Кнопки-пресеты выше подставляют нужный адрес." />
         <input bind:value={url} placeholder="http://127.0.0.1:11434/v1  или  https://api.openai.com/v1" />
     </label>
-    <label>Модель
+    <label>Модель<InfoDot text="Имя модели. Для Ollama — напр. qwen2.5:3b (быстрее) или qwen2.5:7b (умнее). Для ChatGPT — напр. gpt-4o-mini. Должна быть скачана/доступна у провайдера." />
         <input bind:value={model} placeholder="qwen2.5:7b  /  gpt-4o-mini" />
     </label>
-    <label>API-ключ (для ChatGPT; для локальной — пусто)
+    <label>API-ключ (для ChatGPT; для локальной — пусто)<InfoDot text="Ключ доступа к облачной модели (ChatGPT: sk-...). Для локальной Ollama ключ не нужен — оставь пусто. Хранится локально." />
         <input type="password" bind:value={key} placeholder="sk-..." />
     </label>
     <button class="btn primary" on:click={saveConnection}>Сохранить подключение</button>

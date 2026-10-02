@@ -6,6 +6,7 @@
 
     import { showInExplorer } from "@/functions"
     import { appInfo, assistantVoice, translations, translate } from "@/stores"
+    import InfoDot from "@/components/elements/InfoDot.svelte"
 
 
     import {
@@ -494,7 +495,7 @@
     <Tabs.Tab label={t('settings-general')} icon={Gear}>
         <Space h="sm" />
         <div class="voice-select">
-            <label>{t('settings-voice')}</label>
+            <label>{t('settings-voice')}<InfoDot text="Голос, которым Nox озвучивает ответы. На ПК с видеокартой — F5 (клонированный «тот самый» голос). На ноутбуке без видеокарты — лёгкий Silero. Выбор источника голоса (сэмпла), которым синтезируется речь." /></label>
             <p class="description">{t('settings-voice-desc')}</p>
             
             <div class="voice-options">
@@ -533,6 +534,7 @@
 
     <Tabs.Tab label={t('settings-devices')} icon={Mix}>
         <Space h="sm" />
+        <div class="nx-ctl">
         <NativeSelect
             data={availableMicrophones}
             label={t('settings-microphone')}
@@ -540,10 +542,13 @@
             variant="filled"
             bind:value={selectedMicrophone}
         />
+        <span class="nx-ctl-dot"><InfoDot text="Микрофон, с которого Nox слушает команды. «По умолчанию» — системный. Если распознавание плохое — выбери конкретный рабочий микрофон." /></span>
+        </div>
     </Tabs.Tab>
 
     <Tabs.Tab label={t('settings-neural-networks')} icon={Cube}>
         <Space h="sm" />
+        <div class="nx-ctl">
         <NativeSelect
             data={[
                 { label: "Rustpotter", value: "Rustpotter" },
@@ -555,6 +560,8 @@
             variant="filled"
             bind:value={selectedWakeWordEngine}
         />
+        <span class="nx-ctl-dot"><InfoDot text="Движок, который ловит слово активации. Rustpotter — лёгкий офлайн (по умолчанию). Vosk — по распознаванию речи. Picovoice — точнее, но нужен бесплатный ключ. От выбора зависит чувствительность пробуждения." /></span>
+        </div>
 
         {#if selectedWakeWordEngine === "picovoice"}
             <Space h="sm" />
@@ -585,6 +592,7 @@
 
         <Space h="xl" />
         {#key availableVoskModels}
+        <div class="nx-ctl">
         <NativeSelect
             data={[
                 { label: t('settings-auto-detect'), value: "" },
@@ -595,6 +603,8 @@
             variant="filled"
             bind:value={selectedVoskModel}
         />
+        <span class="nx-ctl-dot"><InfoDot text="Модель распознавания речи Vosk (перевод голоса в текст). Для русского — vosk-model-small-ru. «Автоопределение» берёт подходящую по языку. Чем крупнее модель, тем точнее, но тяжелее." /></span>
+        </div>
         {/key}
 
         {#if availableVoskModels.length === 0}
@@ -607,6 +617,7 @@
         {/if}
 
         <Space h="xl" />
+        <div class="nx-ctl">
         <NativeSelect
             data={[
                 { label: "Intent Classifier", value: "IntentClassifier" },
@@ -617,8 +628,11 @@
             variant="filled"
             bind:value={selectedIntentRecognitionEngine}
         />
+        <span class="nx-ctl-dot"><InfoDot text="Как Nox понимает, ЧТО ты хочешь (какая команда). Intent Classifier — по ключевым словам, быстрее. Embedding Classifier — по смыслу фразы (эмбеддинги), гибче к формулировкам, чуть тяжелее." /></span>
+        </div>
 
         <Space h="xl" />
+        <div class="nx-ctl">
         <NativeSelect
             data={[
                 { label: t('settings-disabled'), value: "None" },
@@ -629,10 +643,13 @@
             variant="filled"
             bind:value={selectedSlotExtractionEngine}
         />
+        <span class="nx-ctl-dot"><InfoDot text="Извлечение параметров из команды (напр. «купи 10 лотов Сбера по 300» → количество, бумага, цена). GLiNER — нейросетевой разбор (точнее на свободных формулировках). «Отключено» — только простые правила. Применяется после перезапуска движка." /></span>
+        </div>
 
         {#if selectedSlotExtractionEngine === "GLiNER"}
             <Space h="sm" />
             {#key availableGlinerModels}
+            <div class="nx-ctl">
             <NativeSelect
                 data={[
                     { label: t('settings-auto-detect'), value: "" },
@@ -643,6 +660,8 @@
                 variant="filled"
                 bind:value={selectedGlinerModel}
             />
+            <span class="nx-ctl-dot"><InfoDot text="Конкретная модель GLiNER для извлечения параметров. «Автоопределение» берёт первую установленную (gliner_multi — многоязычная, int8). Если список пуст — модель не скачана." /></span>
+            </div>
             {/key}
 
             {#if availableGlinerModels.length === 0}
@@ -656,6 +675,7 @@
         {/if}
 
         <Space h="xl" />
+        <div class="nx-ctl">
         <NativeSelect
             data={[
                 { label: t('settings-disabled'), value: "None" },
@@ -666,9 +686,12 @@
             variant="filled"
             bind:value={selectedNoiseSuppression}
         />
+        <span class="nx-ctl-dot"><InfoDot text="Подавление фонового шума с микрофона перед распознаванием. Полезно в шумной комнате; на чистом микрофоне можно отключить." /></span>
+        </div>
 
         <Space h="md" />
 
+        <div class="nx-ctl">
         <NativeSelect
             data={[
                 { label: t('settings-disabled'), value: "None" },
@@ -680,10 +703,14 @@
             variant="filled"
             bind:value={selectedVad}
         />
+        <span class="nx-ctl-dot"><InfoDot text="VAD — определение границ речи (где начинается и кончается фраза). Energy — по громкости, быстро. Помогает не обрезать команду и не реагировать на тишину/шум." /></span>
+        </div>
 
         <Space h="md" />
 
+        <div class="nx-ctl">
         <InputWrapper label={t('settings-gain-normalizer')}>
+            <span class="nx-ctl-dot"><InfoDot text="Авто-выравнивание громкости микрофона: тихую речь подтягивает, громкую приглушает. Помогает распознаванию, если говоришь то тихо, то громко." /></span>
             <Text size="sm" color="gray">
                 {t('settings-gain-normalizer-desc')}
             </Text>
@@ -693,6 +720,7 @@
                 bind:checked={gainNormalizerEnabled}
             />
         </InputWrapper>
+        </div>
 
         <Space h="xl" />
 
@@ -716,7 +744,7 @@
         <Space h="sm" />
 
         <div class="nx-block">
-            <label class="nx-lab">Слово активации</label>
+            <label class="nx-lab">Слово активации<InfoDot text="Имя-обращение, по которому Nox просыпается и слушает команду (по умолчанию «джарвис»). Можно задать своё. Смена имени применяется после перезапуска ассистента — грамматика распознавания строится при старте." /></label>
             <p class="nx-desc">Каким словом звать ассистента голосом. Применяется после перезапуска ассистента (кнопка «Запустить» на Пульсе).</p>
             <div class="nx-row">
                 <input class="nx-in" placeholder="нокс" bind:value={wakeWord} />
@@ -728,7 +756,7 @@
         </div>
 
         <div class="nx-block">
-            <label class="nx-lab">Клавиша активации вручную</label>
+            <label class="nx-lab">Клавиша активации вручную<InfoDot text="Горячая клавиша (или кнопка мыши), по которой Nox начинает слушать сразу — без произнесения имени. Удобно, когда не хочется говорить слово активации." /></label>
             <p class="nx-desc">Нажми и держи — Nox начнёт слушать команду сразу, без слова «нокс». Работает даже при выключенном микрофоне и без голосового ввода.</p>
             <div class="nx-row">
                 <select class="nx-in" bind:value={activationHotkey}>
@@ -765,7 +793,7 @@
         {#if filterError}<div class="nx-err">{filterError}</div>{/if}
 
         <div class="nx-block">
-            <label class="nx-lab">Тикеры</label>
+            <label class="nx-lab">Тикеры<InfoDot text="Список бумаг (тикеров), новости по которым Nox озвучивает. Если список пуст — срабатывают другие фильтры (фразы/источники). Пример: SBER, GAZP, NVTK." /></label>
             <div class="chips">
                 {#each filter.tickers as v}
                     <span class="chip tk">{v}<button on:click={() => filterRemove("ticker", v)}>✕</button></span>
@@ -781,7 +809,7 @@
         </div>
 
         <div class="nx-block">
-            <label class="nx-lab">Ключевые фразы</label>
+            <label class="nx-lab">Ключевые фразы<InfoDot text="Слова и фразы, при появлении которых в новости Nox её озвучит (напр. «дивиденды», «санкции», «оферта»). Работает независимо от тикеров." /></label>
             <div class="chips">
                 {#each filter.phrases as v}
                     <span class="chip ph">{v}<button on:click={() => filterRemove("phrase", v)}>✕</button></span>
@@ -797,7 +825,7 @@
         </div>
 
         <div class="nx-block">
-            <label class="nx-lab">Источники</label>
+            <label class="nx-lab">Источники<InfoDot text="Фильтр по источникам новостей: озвучивать только из выбранных (напр. Интерфакс, MOEX). Пусто — все источники." /></label>
             <div class="chips">
                 {#each filter.sources as v}
                     <span class="chip src">{v}<button on:click={() => filterRemove("source", v)}>✕</button></span>
@@ -827,7 +855,7 @@
         {#if magError}<div class="nx-err">{magError}</div>{/if}
 
         <div class="nx-block">
-            <label class="nx-lab">Бумаги под наблюдением</label>
+            <label class="nx-lab">Бумаги под наблюдением<InfoDot text="Тикеры, по которым Магеллан следит за потоком сделок (order flow MOEX) и предупреждает о сильном перекосе покупатели/продавцы, крупных сделках и резком движении цены." /></label>
             <div class="chips">
                 {#each magTickers as v}
                     <span class="chip tk">{v}<button on:click={() => magRemoveTicker(v)}>✕</button></span>
@@ -843,7 +871,7 @@
         </div>
 
         <div class="nx-block">
-            <label class="nx-lab">Пороги уведомлений</label>
+            <label class="nx-lab">Пороги уведомлений<InfoDot text="Когда Магеллан подаёт голос: дисбаланс покупатели/продавцы (%), минимальное движение цены (%), минимальный оборот (млн ₽). Чем выше пороги — тем реже и только о крупном. Повтор не чаще раза в 20 минут." /></label>
             <div class="nx-row" style="gap:16px; flex-wrap:wrap">
                 <label class="nx-fld">Дисбаланс, %<input class="nx-num" type="number" min="1" max="50" bind:value={magImb} on:change={magSaveThresholds} /></label>
                 <label class="nx-fld">Движение цены, %<input class="nx-num" type="number" min="0.1" step="0.1" bind:value={magPrice} on:change={magSaveThresholds} /></label>
@@ -856,7 +884,7 @@
     <Tabs.Tab label="Сценарии" icon={Code}>
         <Space h="sm" />
         <div class="nx-block">
-            <label class="nx-lab">Авто-клик стакана по новости</label>
+            <label class="nx-lab">Авто-клик стакана по новости<InfoDot text="Опиши правило словами — по нужной новости Nox сам откроет заготовленный стакан (один клик по координате). Купить/Продать жмёшь ТЫ. Пример: «Новатэк дивиденды: нет → стакан 1; 1-30 → стакан 2; больше 30 → стакан 3». Координаты задаются наведением мыши + F2." /></label>
             <p class="nx-desc">Опиши правило словами — Nox по нужной новости сам откроет заготовленный стакан (клик по координате). Купить/Продать жмёшь ты. Пример: «Новатэк дивиденды: нет → стакан 1; от 1 до 30 рублей → стакан 2; больше 30 → стакан 3».</p>
             <textarea class="nx-in" rows="5" style="width:100%;min-height:120px;resize:vertical;line-height:1.4;font-size:14px" placeholder="Новатэк дивиденды: нет → стакан 1; 1-30 → стакан 2; больше 30 → стакан 3&#10;&#10;или: нонфарм 02.10.2026 — больше 99к → сценарий 1; меньше 75 → сценарий 2; 75-99к → без действий" bind:value={scnText}></textarea>
             <div class="nx-row">
@@ -894,7 +922,7 @@
 
         {#if scnList.length}
             <div class="nx-block">
-                <label class="nx-lab">Активные сценарии</label>
+                <label class="nx-lab">Активные сценарии<InfoDot text="Сохранённые сценарии авто-клика. Тумблер вкл/выкл; «показать точки» — красные плюсы на экране в заданных координатах; «⏰ ожидается» — время события (за 3 мин прогрев); «🧪 тест» — прогнать с числом (клик без ожидания новости)." /></label>
                 {#each scnList as s}
                     <div class="nx-row" style="align-items:center">
                         <span class="dot" class:on={s.enabled}></span>
@@ -934,7 +962,7 @@
         {/if}
 
         <div class="nx-block">
-            <label class="nx-lab">Мозг сценариев (разбор новости)</label>
+            <label class="nx-lab">Мозг сценариев (разбор новости)<InfoDot text="Чем Nox разбирает новость и выбирает стакан. Ollama — локально, мгновенно (~0.1с), бесплатно. Claude (подписка/API) — точнее на хитрых формулировках, но медленнее и нужен вход/VPN. В окне важного события Nox запускает ГОНКУ источников — побеждает самый быстрый." /></label>
             <div class="nx-row">
                 <select class="nx-in" bind:value={scnBrain} on:change={saveBrain}>
                     <option value="ollama">Ollama (локально, бесплатно)</option>
@@ -1115,6 +1143,8 @@ $voice-max-visible: 3;
 $nx-accent: #35e0d0; $nx-amber: #f6b352; $nx-muted: #8592a6;
 .nx-block { margin-bottom: 1.1rem; padding-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
 .nx-lab { font-weight: 600; font-size: 0.9rem; color: #fff; display: block; margin-bottom: 0.25rem; }
+.nx-ctl { position: relative; }
+.nx-ctl :global(.nx-ctl-dot) { position: absolute; top: 0; right: 2px; z-index: 5; }
 .nx-desc { font-size: 0.75rem; color: rgba(255,255,255,0.5); margin: 0 0 0.6rem; }
 .nx-hint { font-size: 0.72rem; color: rgba(255,255,255,0.38); margin: 0.4rem 0 0; }
 .nx-ok { font-size: 0.75rem; color: $nx-accent; margin: 0.4rem 0 0; }

@@ -2,6 +2,7 @@
     import { onMount } from "svelte"
     import { invoke } from "@tauri-apps/api/core"
     import HDivider from "@/components/elements/HDivider.svelte"
+    import InfoDot from "@/components/elements/InfoDot.svelte"
 
     type Cmd = {
         id: string
@@ -150,11 +151,11 @@
         <div class="editor">
             <h3>{isNew ? "Новая команда" : `Редактирование: ${editing?.id}`}</h3>
 
-            <label>ID (латиницей, уникальный)
+            <label>ID (латиницей, уникальный)<InfoDot text="Внутренний идентификатор команды (латиницей, без пробелов), напр. open_notepad. Используется как имя папки команды; после создания не меняется." />
                 <input bind:value={f_id} placeholder="open_notepad" disabled={!isNew} />
             </label>
 
-            <label>Тип действия
+            <label>Тип действия<InfoDot text="Что делает команда: «Запуск программы/скрипта» — открыть .exe или AHK-скрипт; «Команда в терминале» — выполнить CLI-команду; «Lua-скрипт» — продвинутый сценарий на Lua. Голосовые фразы для вызова задаются ниже." />
                 <select bind:value={f_type}>
                     <option value="ahk">Запуск программы/скрипта (.exe / AHK)</option>
                     <option value="cli">Команда в терминале (CLI)</option>
