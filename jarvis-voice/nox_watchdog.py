@@ -103,11 +103,32 @@ GRACE = {"tts": 70, "yandex": 25, "app": 20, "gui": 15, "ollama": 20,
 def _grace_ok(key):
     return time.time() - _last_start.get(key, 0) > GRACE.get(key, GRACE["default"])
 
+def _tts_script():
+    """Выбор движка голоса: файл tts_engine.txt ('silero'/'f5'); по умолчанию — Silero,
+    если нет NVIDIA-видеокарты (CPU-ноут), иначе F5."""
+    try:
+        eng = open(r"C:\jarvis-voice\tts_engine.txt", encoding="utf-8").read().strip().lower()
+    except Exception:
+        eng = ""
+    if eng == "silero":
+        return "tts_silero_server.py"
+    if eng == "f5":
+        return "tts_server.py"
+    # авто: есть ли nvidia-smi?
+    try:
+        import shutil, subprocess
+        if shutil.which("nvidia-smi"):
+            subprocess.run(["nvidia-smi"], capture_output=True, timeout=5)
+            return "tts_server.py"
+    except Exception:
+        pass
+    return "tts_silero_server.py"
+
 def _tick():
     restarted = []
     checks = [
         ("ollama",   lambda: ensure_ollama(),                                   "Ollama"),
-        ("tts",      lambda: ensure_py("tts_server.py", 8123, "tts", 70),       "озвучка"),
+        ("tts",      lambda: ensure_py(_tts_script(), 8123, "tts", 70),         "озвучка"),
         ("invest",   lambda: ensure_py("invest_reader.py", 8124, "ir", 15),     "портфель"),
         ("yandex",   lambda: ensure_yandex(),                                   "окно терминала"),
         ("terminal", lambda: ensure_py("terminal_reader.py", 8126, "tr", 25),   "читатель терминала"),
