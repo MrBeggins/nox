@@ -1,0 +1,273 @@
+<title>Установка Nox</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&display=swap">
+<style>
+/* Layout: одноколоночный технический гайд, шаги-карточки с номерами, таблицы ресурсов/портов.
+   Палитра: глубокий сланец + бирюзовый акцент Nox + тёплый янтарь для «внимание». */
+:root{
+  --bg:#f3f5f7; --panel:#ffffff; --ink:#15202b; --muted:#5b6b7a; --line:#e2e8ee;
+  --accent:#17a2a2; --accent-ink:#0b6b6b; --warn:#c0772a; --danger:#c0453f; --code:#0f1722; --code-ink:#dbe6f0;
+  --font:"Manrope",system-ui,Segoe UI,Roboto,sans-serif;
+}
+@media (prefers-color-scheme:dark){ :root:not([data-theme="light"]){
+  --bg:#0c1118; --panel:#121a24; --ink:#e7eef6; --muted:#9fb0c0; --line:#243243;
+  --accent:#3fd0cf; --accent-ink:#8fe6e5; --warn:#e3a85c; --danger:#ef6b64; --code:#0a1017; --code-ink:#dbe6f0;
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --bg:#0c1118; --panel:#121a24; --ink:#e7eef6; --muted:#9fb0c0; --line:#243243;
+  --accent:#3fd0cf; --accent-ink:#8fe6e5; --warn:#e3a85c; --danger:#ef6b64; --code:#0a1017; --code-ink:#dbe6f0;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--font);line-height:1.5;margin:0}
+.wrap{max-width:860px;margin:0 auto;padding-block:28px;padding-left:16px;padding-right:16px}
+h1{font-size:clamp(28px,6vw,44px);font-weight:800;margin:0 0 6px;letter-spacing:-.02em;text-wrap:balance}
+h2{font-size:clamp(19px,4vw,24px);font-weight:800;margin:0;letter-spacing:-.01em}
+h3{font-size:15px;font-weight:700;margin:18px 0 6px}
+p{margin:.5em 0}
+a{color:var(--accent-ink);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--accent) 45%,transparent)}
+a:hover{border-bottom-color:var(--accent)}
+.sub{color:var(--muted);font-size:15px;max-width:62ch}
+.hero{display:flex;gap:16px;align-items:center;margin-bottom:22px}
+.logo{flex:0 0 auto;width:62px;height:62px}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--accent-ink);
+  background:color-mix(in srgb,var(--accent) 16%,transparent);border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
+  padding:3px 10px;border-radius:999px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 18px;margin:14px 0}
+.step{display:grid;grid-template-columns:44px 1fr;gap:14px;align-items:start}
+.num{grid-row:1/99;width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+  background:var(--accent);color:#04201f;font-weight:800;font-size:19px}
+.note{border-left:3px solid var(--warn);background:color-mix(in srgb,var(--warn) 10%,transparent);
+  padding:10px 12px;border-radius:0 10px 10px 0;margin:10px 0;font-size:14px}
+.danger{border-left-color:var(--danger);background:color-mix(in srgb,var(--danger) 10%,transparent)}
+code,kbd{font-family:ui-monospace,"Cascadia Code",Consolas,monospace;font-size:.92em}
+.cmd{background:var(--code);color:var(--code-ink);border-radius:10px;padding:11px 13px;margin:8px 0;overflow-x:auto;
+  font-family:ui-monospace,Consolas,monospace;font-size:13px;white-space:pre;border:1px solid #1d2a38}
+table{width:100%;border-collapse:collapse;font-size:13.5px;margin:6px 0}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+td code{background:color-mix(in srgb,var(--accent) 12%,transparent);padding:1px 5px;border-radius:5px}
+.tbl-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px}
+.tbl-wrap table{margin:0}
+.tbl-wrap th,.tbl-wrap td{padding-left:12px}
+.grp{font-weight:800;color:var(--accent-ink)}
+.ic{width:22px;height:22px;vertical-align:-5px;margin-right:6px;color:var(--accent)}
+ul{margin:.4em 0;padding-left:20px}li{margin:3px 0}
+.foot{color:var(--muted);font-size:13px;margin-top:26px;border-top:1px solid var(--line);padding-top:14px}
+.safe{border:1px dashed color-mix(in srgb,var(--danger) 55%,transparent);border-radius:12px;padding:12px 14px;
+  background:color-mix(in srgb,var(--danger) 7%,transparent);font-size:14px}
+</style>
+
+<div class="wrap">
+
+  <div class="hero">
+    <svg class="logo" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+      <circle cx="32" cy="32" r="30" fill="none" stroke="var(--accent)" stroke-width="3"/>
+      <circle cx="32" cy="32" r="12" fill="var(--accent)" opacity=".22"/>
+      <circle cx="32" cy="32" r="5" fill="var(--accent)"/>
+      <g stroke="var(--accent)" stroke-width="3" stroke-linecap="round">
+        <path d="M32 6v9M32 49v9M6 32h9M49 32h9"/>
+      </g>
+    </svg>
+    <div>
+      <span class="pill">● офлайн голосовой ассистент + торговый компаньон</span>
+      <h1>Установка Nox с нуля</h1>
+      <p class="sub">Пошаговая инструкция для нового компьютера: что скачать, как настроить и запустить. Для Windows 10/11 x64.</p>
+    </div>
+  </div>
+
+  <div class="safe">
+    <b>Граница безопасности.</b> Nox только <b>читает и готовит</b>: портфель, котировки, стакан, новости, алерты,
+    открытие нужного стакана по сценарию. Кнопку <b>«Купить / Продать / Подтвердить» жмёшь только ты.</b>
+    Сделки и переводы ассистент не исполняет.
+  </div>
+
+  <div class="card">
+    <h2><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>С чего начать: два пути</h2>
+    <p class="sub" style="margin-top:4px">Есть автоматический установщик — рекомендуется. Ручной путь ниже нужен, только если хочешь ставить всё сам.</p>
+    <h3>Путь A — автоматический («как игра из Steam»)</h3>
+    <ul>
+      <li>Скопируй папку установщика <code>nox-installer</code> на новый компьютер (с флешки/облака).</li>
+      <li>Двойной клик по <b>Установить-Nox.bat</b> → согласись на права администратора.</li>
+      <li>Он сам поставит ПО, создаст окружение, скачает модели, настроит и сделает ярлык <b>«Nox»</b> на рабочем столе.</li>
+    </ul>
+    <h3>Путь B — вручную</h3>
+    <p class="sub">Шаги 1–7 ниже. Качаешь исходники, ставишь ПО и модели, собираешь, запускаешь.</p>
+    <div class="note">Проект в приватном репозитории <a href="https://github.com/MrBeggins/nox">github.com/MrBeggins/nox</a> (нужен твой вход в GitHub). Там же лежит папка <code>installer/</code> и полный <code>README.md</code>.</div>
+  </div>
+
+  <!-- ШАГ 1 -->
+  <div class="card step">
+    <div class="num">1</div>
+    <div>
+      <h2>Установить системное ПО</h2>
+      <p class="sub">Проще всего через <code>winget</code> в PowerShell (или скачать по ссылкам из таблицы ресурсов ниже).</p>
+      <div class="cmd">winget install Git.Git
+winget install Rustlang.Rustup
+winget install OpenJS.NodeJS.LTS
+winget install Python.Python.3.11
+winget install Ollama.Ollama
+winget install Gyan.FFmpeg
+winget install Yandex.Browser</div>
+      <p>Плюс <b>Visual Studio 2022 Build Tools</b> с компонентом «Desktop development with C++» (нужно для сборки). После Rust — <code>rustup default stable-msvc</code>.</p>
+    </div>
+  </div>
+
+  <!-- ШАГ 2 -->
+  <div class="card step">
+    <div class="num">2</div>
+    <div>
+      <h2>Разложить код по ASCII-путям</h2>
+      <div class="note danger"><b>Важно:</b> пути захардкожены и Vosk ломается на кириллице — папки должны лежать именно здесь: <code>C:\jarvis-lab</code> и <code>C:\jarvis-voice</code>.</div>
+      <div class="cmd">git clone &lt;ссылка-на-репозиторий&gt; C:\nox-src
+robocopy C:\nox-src\jarvis-lab   C:\jarvis-lab   /E
+robocopy C:\nox-src\jarvis-voice C:\jarvis-voice /E</div>
+    </div>
+  </div>
+
+  <!-- ШАГ 3 -->
+  <div class="card step">
+    <div class="num">3</div>
+    <div>
+      <h2>Python-окружение</h2>
+      <div class="cmd">cd C:\jarvis-voice
+py -3.11 -m venv .venv
+.\.venv\Scripts\python -m pip install --upgrade pip
+rem GPU (видеокарта NVIDIA):
+.\.venv\Scripts\python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+rem ноутбук без видеокарты — CPU:
+rem .\.venv\Scripts\python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m playwright install chromium</div>
+      <p class="sub">Проверка GPU: <code>python -c "import torch; print(torch.cuda.is_available())"</code> → <code>True</code>.</p>
+    </div>
+  </div>
+
+  <!-- ШАГ 4 -->
+  <div class="card step">
+    <div class="num">4</div>
+    <div>
+      <h2>Скачать модели</h2>
+      <p class="sub">В репозиторий не входят (большие). Разложить строго по путям — см. таблицу «Модели» ниже. Коротко:</p>
+      <ul>
+        <li><b>Распознавание речи (Vosk):</b> <code>vosk-model-small-ru-0.22</code> → <code>C:\jarvis-lab\resources\vosk\</code></li>
+        <li><b>Голос (F5-TTS, если есть GPU):</b> <code>model_last_inference.safetensors</code> + <code>vocab.txt</code> → <code>C:\jarvis-voice\models\ru\</code></li>
+        <li><b>Голос на CPU (Silero):</b> скачается сам при первом запуске.</li>
+        <li><b>GLiNER (извлечение параметров):</b> <code>model_int8.onnx</code> → переименовать в <code>model.onnx</code> → <code>…\resources\models\gliner_multi-v2.1\onnx\</code></li>
+        <li><b>Эмбеддинги (интент):</b> all-MiniLM-L6-v2 и paraphrase-multilingual → <code>C:\jarvis-lab\resources\models\</code></li>
+      </ul>
+      <p class="sub">Эмбеддинги и GLiNER уже лежат в папке установщика (<code>models\</code>), качать не нужно, если ставишь Путём A.</p>
+    </div>
+  </div>
+
+  <!-- ШАГ 5 -->
+  <div class="card step">
+    <div class="num">5</div>
+    <div>
+      <h2>Мозг (Ollama) и сборка</h2>
+      <div class="cmd">ollama pull qwen2.5:3b
+setx OLLAMA_KEEP_ALIVE -1
+
+cd C:\jarvis-lab\frontend
+npm install
+node node_modules/esbuild/install.js
+npx vite build
+
+cd C:\jarvis-lab
+cargo build --release -p jarvis-gui
+cargo build --release -p jarvis-app
+py -3.11 post_build.py</div>
+      <p class="sub">При Пути A сборка не нужна — в установщике готовые <code>jarvis-app.exe</code> / <code>jarvis-gui.exe</code>.</p>
+    </div>
+  </div>
+
+  <!-- ШАГ 6 -->
+  <div class="card step">
+    <div class="num">6</div>
+    <div>
+      <h2>Ключи и доступы</h2>
+      <p class="sub">Всё необязательно, но без этого часть функций не работает. Задаётся в интерфейсе или файлами в <code>C:\jarvis-voice\</code> (только ключ, одной строкой, <b>без лишнего текста</b>).</p>
+      <div class="tbl-wrap"><table>
+        <tr><th>Доступ</th><th>Зачем</th><th>Где взять / куда</th></tr>
+        <tr><td><b>T-Invest токен</b></td><td>портфель, котировки, стакан (только чтение)</td><td>T-Банк → Инвестиции → Токены Invest API → «Только чтение». Вкладка «Т-Терминал».</td></tr>
+        <tr><td><b>Ключ BLS</b></td><td>США real-time: нонфарм, CPI, PPI</td><td><a href="https://data.bls.gov/registrationEngine/">data.bls.gov/registrationEngine</a> → в <code>bls_key.txt</code></td></tr>
+        <tr><td><b>UserID BEA</b></td><td>США: ВВП и PCE</td><td><a href="https://apps.bea.gov/api/signup/">apps.bea.gov/api/signup</a> → в <code>bea_key.txt</code></td></tr>
+        <tr><td><b>Telegram api_id/api_hash</b></td><td>чтение выбранных чатов/каналов</td><td><a href="https://my.telegram.org">my.telegram.org</a> → вкладка «Телеграм» → «Войти»</td></tr>
+        <tr><td><b>Claude (подписка)</b></td><td>умнее разбирает новости (в гонке источников)</td><td>запустить <code>claude-login.cmd</code> + включить VPN</td></tr>
+      </table></div>
+    </div>
+  </div>
+
+  <!-- ШАГ 7 -->
+  <div class="card step">
+    <div class="num">7</div>
+    <div>
+      <h2>Запуск</h2>
+      <div class="cmd">powershell -ExecutionPolicy Bypass -File C:\jarvis-lab\start-jarvis.ps1</div>
+      <p>Или ярлык <b>«Nox»</b> на рабочем столе (создаёт установщик). Поднимаются все службы, сторож (watchdog) перезапускает упавшее. Для чтения терминала открой в окне Яндекса <code>tbank.ru/terminal</code> и войди один раз.</p>
+    </div>
+  </div>
+
+  <!-- РЕСУРСЫ -->
+  <div class="card">
+    <h2><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7a2 2 0 012-2h5l2 2h5a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2z"/></svg>Все ссылки для скачивания</h2>
+    <div class="tbl-wrap"><table>
+      <tr><th>Ресурс</th><th>Ссылка</th></tr>
+      <tr><td class="grp" colspan="2">Программа</td></tr>
+      <tr><td>Исходники Nox (приватный репозиторий)</td><td><a href="https://github.com/MrBeggins/nox">github.com/MrBeggins/nox</a></td></tr>
+      <tr><td class="grp" colspan="2">Системное ПО</td></tr>
+      <tr><td>Git</td><td><a href="https://git-scm.com/download/win">git-scm.com/download/win</a></td></tr>
+      <tr><td>Rust (rustup)</td><td><a href="https://rustup.rs/">rustup.rs</a></td></tr>
+      <tr><td>Node.js LTS</td><td><a href="https://nodejs.org/en/download">nodejs.org/en/download</a></td></tr>
+      <tr><td>Python 3.11</td><td><a href="https://www.python.org/downloads/windows/">python.org/downloads/windows</a></td></tr>
+      <tr><td>Ollama</td><td><a href="https://ollama.com/download">ollama.com/download</a></td></tr>
+      <tr><td>FFmpeg (Gyan build)</td><td><a href="https://www.gyan.dev/ffmpeg/builds/">gyan.dev/ffmpeg/builds</a></td></tr>
+      <tr><td>Yandex Browser</td><td><a href="https://browser.yandex.ru/">browser.yandex.ru</a></td></tr>
+      <tr><td>VS 2022 Build Tools (C++)</td><td><a href="https://visualstudio.microsoft.com/visual-studio-build-tools/">visualstudio.microsoft.com/visual-studio-build-tools</a></td></tr>
+      <tr><td class="grp" colspan="2">Модели</td></tr>
+      <tr><td>Vosk (русская речь)</td><td><a href="https://alphacephei.com/vosk/models">alphacephei.com/vosk/models</a> → vosk-model-small-ru-0.22</td></tr>
+      <tr><td>F5-TTS русский голос</td><td><a href="https://huggingface.co/Misha24-10/F5-TTS_RUSSIAN">huggingface.co/Misha24-10/F5-TTS_RUSSIAN</a></td></tr>
+      <tr><td>GLiNER (ONNX int8)</td><td><a href="https://huggingface.co/onnx-community/gliner_multi">huggingface.co/onnx-community/gliner_multi</a> → onnx/model_int8.onnx</td></tr>
+      <tr><td>Эмбеддинги (интент)</td><td><a href="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2">all-MiniLM-L6-v2</a>, paraphrase-multilingual-MiniLM-L12-v2</td></tr>
+      <tr><td>Silero (CPU-голос)</td><td>качается автоматически с models.silero.ai</td></tr>
+      <tr><td class="grp" colspan="2">Регистрации (ключи)</td></tr>
+      <tr><td>BLS (макро США)</td><td><a href="https://data.bls.gov/registrationEngine/">data.bls.gov/registrationEngine</a></td></tr>
+      <tr><td>BEA (ВВП/PCE)</td><td><a href="https://apps.bea.gov/api/signup/">apps.bea.gov/api/signup</a></td></tr>
+      <tr><td>Telegram API</td><td><a href="https://my.telegram.org">my.telegram.org</a></td></tr>
+    </table></div>
+  </div>
+
+  <!-- ПОРТЫ -->
+  <div class="card">
+    <h2><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg>Службы и порты</h2>
+    <div class="tbl-wrap"><table>
+      <tr><th>Порт</th><th>Служба</th><th>Назначение</th></tr>
+      <tr><td><code>9712</code></td><td>jarvis-app</td><td>голосовой движок (STT → мозг → голос)</td></tr>
+      <tr><td><code>11434</code></td><td>Ollama</td><td>локальный мозг qwen2.5:3b</td></tr>
+      <tr><td><code>8123</code></td><td>TTS</td><td>голос F5 (GPU) / Silero (CPU)</td></tr>
+      <tr><td><code>8124</code></td><td>invest_reader</td><td>портфель/котировки/стакан</td></tr>
+      <tr><td><code>8126</code></td><td>terminal_reader</td><td>новости Trading Tools + календарь</td></tr>
+      <tr><td><code>8127</code></td><td>magellan_reader</td><td>order flow MOEX</td></tr>
+      <tr><td><code>8128</code></td><td>bls_reader</td><td>макро США (нонфарм/CPI/PPI/JOLTS)</td></tr>
+      <tr><td><code>8129</code></td><td>bea_reader</td><td>ВВП и PCE США</td></tr>
+      <tr><td><code>8131</code></td><td>tg_reader</td><td>Телеграм (выбранные чаты)</td></tr>
+      <tr><td><code>8130</code></td><td>watchdog</td><td>следит и перезапускает упавшее</td></tr>
+    </table></div>
+  </div>
+
+  <!-- ТРАБЛШУТИНГ -->
+  <div class="card">
+    <h2><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 4h.01M10.3 3.9l-8 14A2 2 0 004 21h16a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>Частые грабли</h2>
+    <ul>
+      <li><b>Ключ «не видит»</b> — у файла двойное расширение (<code>bls_key.txt.txt</code>) из-за скрытых расширений Windows. Включи «Вид → Расширения имён файлов» и переименуй в <code>bls_key.txt</code>.</li>
+      <li><b>Настройки слетают в дефолт</b> — в <code>app.db</code> попал BOM. Править только в UTF-8 без BOM.</li>
+      <li><b>Vosk не грузится / тишина</b> — путь с кириллицей. Папки должны быть в <code>C:\jarvis-lab</code> / <code>C:\jarvis-voice</code>.</li>
+      <li><b>Голос Павел вместо основного</b> — F5/Silero-сервер (8123) ещё грузится; после прогрева идёт основной.</li>
+      <li><b>Claude «Not logged in» / 403 из РФ</b> — нужен <code>claude login</code> и включённый VPN.</li>
+      <li><b>Правки ядра не применились</b> — пересобери <code>jarvis-app</code> (не только GUI).</li>
+    </ul>
+  </div>
+
+  <p class="foot">Nox — форк <a href="https://github.com/Priler/jarvis">Priler/jarvis</a> (GPL-3.0), расширенный Python-сервисами. Полная техническая документация — в <code>README.md</code> и <code>ВЫГРУЗКА_ЧАТА.md</code> репозитория.</p>
+
+</div>
