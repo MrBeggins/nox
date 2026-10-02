@@ -93,6 +93,13 @@ def _handle_message(chat_title, text):
         return
     if not _match(text, cfg.get("keywords", []), cfg.get("match", "any")):
         return
+    # дедуп: ту же новость (из ТГ или из ленты терминала) не повторяем 15 мин
+    try:
+        import nox_dedup
+        if nox_dedup.is_dup(text):
+            return
+    except Exception:
+        pass
     short = _shorten(text)
     _log(f"[{chat_title}] {short}")
     _announce(f"Телеграм, {chat_title}: {short}")

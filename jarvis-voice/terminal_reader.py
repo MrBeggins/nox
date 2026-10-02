@@ -22,6 +22,17 @@ try:
     import nox_calendar
 except Exception:
     nox_calendar = None
+try:
+    import nox_dedup
+except Exception:
+    nox_dedup = None
+
+def _is_dup(text):
+    """Похожая новость уже озвучивалась в последние 15 мин? (анти-повтор из разных источников)"""
+    try:
+        return bool(nox_dedup and nox_dedup.is_dup(text))
+    except Exception:
+        return False
 
 CDP_URL = "http://127.0.0.1:9222"
 TERMINAL_MATCH = "tbank.ru"
@@ -524,15 +535,16 @@ def _monitor_loop():
                 except Exception:
                     ev = None
                 if ev:
-                    if _mon_enabled():
+                    # дедуп: ту же новость из другого источника не озвучиваем 15 мин
+                    if _mon_enabled() and not _is_dup(it.get("text", "")):
                         _ipc_announce(_ns.speak_event(ev)); time.sleep(0.4)
                     continue                     # ключевое событие уже обработано
                 if _mon_enabled():               # прочие новости — прежняя логика
                     if smart:
                         say = _ollama_judge(it.get("text", ""))
-                        if say:
+                        if say and not _is_dup(it.get("text", "")):
                             _ipc_announce(say); time.sleep(0.4)
-                    elif _match(it, cfg):
+                    elif _match(it, cfg) and not _is_dup(it.get("text", "")):
                         _ipc_announce(_shorten(it)); time.sleep(0.4)
         except Exception:
             pass
