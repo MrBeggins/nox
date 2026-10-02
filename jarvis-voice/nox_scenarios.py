@@ -125,12 +125,18 @@ def _openai(system, user, max_tokens, key):
                    {"Content-Type": "application/json", "Authorization": "Bearer " + key})
     return r["choices"][0]["message"]["content"]
 
+_force_claude_until = 0.0   # до этого времени (unix) в окне события предпочитаем Claude
+
 def _llm(system, user, max_tokens=120):
     cfg = load()
     b = cfg.get("brain", "ollama")
+    key = cfg.get("claude_key")
+    # В окне ожидаемого события — Claude (точнее выбор стакана), если ключ есть; иначе обычный роутер.
+    if time.time() < _force_claude_until and key:
+        b = "claude"
     try:
-        if b == "claude" and cfg.get("claude_key"):
-            return _claude(system, user, max_tokens, cfg["claude_key"])
+        if b == "claude" and key:
+            return _claude(system, user, max_tokens, key)
         if b == "openai" and cfg.get("openai_key"):
             return _openai(system, user, max_tokens, cfg["openai_key"])
     except Exception:
@@ -250,6 +256,93 @@ def on_news(items):
             break
     if changed:
         save(cfg)
+
+# ------------------------------------------------------------------ планировщик ожидаемых событий
+# У сценария могут быть поля: schedule_dt "YYYY-MM-DD HH:MM" (МСК) и prewarm_min (по умолч. 3).
+# За prewarm_min до времени: анонс + прогрев Claude + окно, в котором мозг = Claude (с откатом).
+# Сам клик по стакану срабатывает как обычно — по факту новости (США: BLS/BEA; РФ: лента терминала).
+import datetime as _dt
+try:
+    from zoneinfo import ZoneInfo as _ZI
+    _MSK_TZ = _ZI("Europe/Moscow"); _dt.datetime.now(_MSK_TZ)
+    def _now_msk(): return _dt.datetime.now(_MSK_TZ).replace(tzinfo=None)
+except Exception:
+    def _now_msk(): return _dt.datetime.utcnow() + _dt.timedelta(hours=3)
+
+_WINDOW_AFTER = 45 * 60   # сколько секунд после времени события держать Claude «тёплым»
+
+def _parse_dt(s):
+    for fmt in ("%Y-%m-%d %H:%M", "%d.%m.%Y %H:%M", "%d.%m %H:%M"):
+        try:
+            d = _dt.datetime.strptime(s.strip(), fmt)
+            if d.year == 1900:
+                d = d.replace(year=_now_msk().year)
+            return d
+        except Exception:
+            continue
+    return None
+
+def set_schedule(scenario_id, dt_str, prewarm_min=3):
+    cfg = load()
+    for sc in cfg.get("scenarios", []):
+        if str(sc.get("id")) == str(scenario_id):
+            d = _parse_dt(dt_str)
+            if not d:
+                return {"ok": False, "text": "Не понял время, сэр. Формат: 2026-10-29 16:30."}
+            sc["schedule_dt"] = d.strftime("%Y-%m-%d %H:%M")
+            sc["prewarm_min"] = int(prewarm_min or 3)
+            sc["_prewarmed"] = False
+            save(cfg)
+            return {"ok": True, "text": f"Событие «{sc.get('name', sc.get('event',''))}» назначено на "
+                                        f"{d.strftime('%d.%m в %H:%M')}, мозг подготовлю за {sc['prewarm_min']} мин."}
+    return {"ok": False, "text": "Такой сценарий не найден, сэр."}
+
+def _prime_claude(cfg):
+    key = cfg.get("claude_key")
+    if not key:
+        return
+    try:
+        _claude("Ответь одним словом: готов", "прогрев", 5, key)
+    except Exception:
+        pass
+
+def _scheduler_loop():
+    global _force_claude_until
+    while True:
+        try:
+            cfg = load(); changed = False
+            now = _now_msk()
+            for sc in cfg.get("scenarios", []):
+                d = _parse_dt(sc.get("schedule_dt", "") or "")
+                if not d:
+                    continue
+                pre = int(sc.get("prewarm_min", 3)) * 60
+                secs = (d - now).total_seconds()
+                # окно [T-pre .. T+45мин]: держим Claude наготове
+                if -_WINDOW_AFTER <= secs <= pre:
+                    _force_claude_until = max(_force_claude_until, time.time() + _WINDOW_AFTER + max(0, secs))
+                # разовый прогрев + анонс в момент наступления T-pre
+                if 0 < secs <= pre and not sc.get("_prewarmed"):
+                    sc["_prewarmed"] = True; changed = True
+                    _prime_claude(cfg)
+                    mins = max(1, int(round(secs / 60)))
+                    _announce(f"Готовлюсь, сэр: через {mins} мин — "
+                              f"{sc.get('name') or sc.get('event') or 'событие'}. Мозг наготове.")
+                # далёкое будущее (переназначили) — снять флаг, чтобы снова прогрелся
+                if secs > pre + 120 and sc.get("_prewarmed"):
+                    sc["_prewarmed"] = False; changed = True
+            if changed:
+                save(cfg)
+        except Exception:
+            pass
+        time.sleep(20)
+
+_sched_started = False
+def start_scheduler():
+    global _sched_started
+    if not _sched_started:
+        _sched_started = True
+        threading.Thread(target=_scheduler_loop, daemon=True).start()
 
 if __name__ == "__main__":
     import sys, io

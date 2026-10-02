@@ -234,6 +234,12 @@
     }
     async function delScn(id: string) { try { await invoke("scn_del", { id }); await loadScn() } catch (e) {} }
     async function toggleScn(id: string) { try { await invoke("scn_toggle", { id }); await loadScn() } catch (e) {} }
+    async function setSchedule(s: any) {
+        try {
+            await invoke("scn_schedule", { id: s.id, dt: s._dt || "", prewarm: String(s._pre || 3) })
+            await loadScn()
+        } catch (e) {}
+    }
     async function saveBrain() {
         try {
             const r = parseReader(await invoke<string>("scn_brain",
@@ -878,6 +884,16 @@
                         <span class="nx-hint" style="margin:0">{s.instrument} · {s.event} · {s.branches?.length || 0} веток</span>
                         <button class="nx-clr" style="margin-left:auto" on:click={() => toggleScn(s.id)}>{s.enabled ? "выкл" : "вкл"}</button>
                         <button class="nx-clr" on:click={() => delScn(s.id)}>удалить</button>
+                    </div>
+                    <div class="nx-row" style="align-items:center;margin-top:4px">
+                        <span class="nx-hint" style="margin:0">⏰ ожидается:</span>
+                        <input class="nx-in" style="max-width:170px" placeholder="2026-10-29 16:30"
+                               value={s.schedule_dt || ""} on:input={(e) => s._dt = e.currentTarget.value} />
+                        <input class="nx-in" type="number" min="1" max="30" style="max-width:70px"
+                               value={s.prewarm_min || 3} on:input={(e) => s._pre = e.currentTarget.value} title="за сколько минут прогреть Claude" />
+                        <span class="nx-hint" style="margin:0">мин до</span>
+                        <button class="nx-btn" on:click={() => setSchedule(s)}>назначить</button>
+                        {#if s.schedule_dt}<span class="nx-hint" style="margin:0;color:#7fd1a0">✓ {s.schedule_dt}</span>{/if}
                     </div>
                 {/each}
             </div>

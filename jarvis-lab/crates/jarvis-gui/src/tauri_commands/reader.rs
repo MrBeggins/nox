@@ -71,6 +71,11 @@ pub fn scn_toggle(id: String) -> Result<String, String> { get("/scn_toggle", &[(
 pub fn scn_capture() -> Result<String, String> { get("/scn_capture", &[]) }
 
 #[tauri::command]
+pub fn scn_schedule(id: String, dt: String, prewarm: String) -> Result<String, String> {
+    get("/scn_schedule", &[("id", &id), ("dt", &dt), ("prewarm", &prewarm)])
+}
+
+#[tauri::command]
 pub fn scn_brain(brain: String, claude_key: String, openai_key: String) -> Result<String, String> {
     get("/scn_brain", &[("brain", &brain), ("claude_key", &claude_key), ("openai_key", &openai_key)])
 }

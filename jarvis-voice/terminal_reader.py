@@ -178,7 +178,8 @@ def start_worker():
         threading.Thread(target=_samolet_loop, daemon=True).start()
         threading.Thread(target=_terminal_health_loop, daemon=True).start()
         if nox_scenarios:
-            nox_scenarios.start_capture()   # слушаем F2 для захвата координат стаканов
+            nox_scenarios.start_capture()    # слушаем F2 для захвата координат стаканов
+            nox_scenarios.start_scheduler()  # планировщик ожидаемых событий (прогрев Claude, анонс)
 
 _PAGE_STATE_JS = ("()=>({n:document.querySelectorAll('.news_row').length,"
                   "blen:(document.body.innerText||'').length,"
@@ -867,6 +868,14 @@ def scn_capture():
     if not nox_scenarios:
         return {"x": None, "y": None, "ts": 0}
     return nox_scenarios.last_captured()
+
+@app.get("/scn_schedule")
+def scn_schedule(id: str = "", dt: str = "", prewarm: int = 3):
+    """Назначить сценарию время ожидаемого события (МСК). За prewarm минут до —
+    прогрев Claude + анонс; срабатывание — по факту новости (США: BLS/BEA, РФ: лента)."""
+    if not nox_scenarios:
+        return {"ok": False, "text": "Сценарии недоступны."}
+    return nox_scenarios.set_schedule(id, dt, prewarm)
 
 @app.get("/scn_brain")
 def scn_brain(brain: str = "", claude_key: str = "__keep__", openai_key: str = "__keep__"):
