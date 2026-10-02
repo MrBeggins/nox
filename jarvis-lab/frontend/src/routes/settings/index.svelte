@@ -223,9 +223,13 @@
         }
         poll()
     }
+    async function showPoint(x: number, y: number) {
+        try { await invoke("scn_show", { x: String(x), y: String(y) }) } catch (e) {}
+    }
     async function saveScn() {
         if (!parsed) return
-        if (parsed.branches.some((b: any) => b.x == null)) { scnMsg = "Задайте координаты всем веткам."; return }
+        // координаты нужны только веткам с ДЕЙСТВИЕМ (noop — без клика)
+        if (parsed.branches.some((b: any) => !b.noop && b.x == null)) { scnMsg = "Задайте координаты веткам с действием (кроме «без действий»)."; return }
         try {
             await invoke("scn_save", { jsonData: JSON.stringify(parsed) })
             parsed = null; scnText = ""; scnMsg = "Сценарий сохранён."
@@ -861,10 +865,15 @@
                         <span class="nx-hint" style="margin:0">
                             {b.type === "none" ? "нет значения" : b.type === "range" ? `${b.min}–${b.max}` : b.type === "gt" ? `> ${b.min}` : b.type === "lt" ? `< ${b.max}` : "любое"}
                         </span>
-                        <span class="nx-hint" style="margin:0 auto 0 8px">{b.x != null ? `✓ (${b.x}, ${b.y})` : "нет координаты"}</span>
-                        <button class="nx-btn" on:click={() => captureCoord(i)} disabled={capturing >= 0}>
-                            {capturing === i ? "жду F2…" : "Задать (F2)"}
-                        </button>
+                        {#if b.noop}
+                            <span class="nx-hint" style="margin:0 auto 0 8px;color:#9aa4b2">без клика</span>
+                        {:else}
+                            <span class="nx-hint" style="margin:0 auto 0 8px">{b.x != null ? `✓ (${b.x}, ${b.y})` : "нет координаты"}</span>
+                            {#if b.x != null}<button class="nx-clr" on:click={() => showPoint(b.x, b.y)} title="курсор прыгнет в точку">показать</button>{/if}
+                            <button class="nx-btn" on:click={() => captureCoord(i)} disabled={capturing >= 0}>
+                                {capturing === i ? "жду F2…" : "Задать (F2)"}
+                            </button>
+                        {/if}
                     </div>
                 {/each}
                 <div class="nx-row">
@@ -884,6 +893,14 @@
                         <span class="nx-hint" style="margin:0">{s.instrument} · {s.event} · {s.branches?.length || 0} веток</span>
                         <button class="nx-clr" style="margin-left:auto" on:click={() => toggleScn(s.id)}>{s.enabled ? "выкл" : "вкл"}</button>
                         <button class="nx-clr" on:click={() => delScn(s.id)}>удалить</button>
+                    </div>
+                    <div class="nx-row" style="flex-wrap:wrap;gap:6px;margin:2px 0 0 18px">
+                        {#each (s.branches || []) as b}
+                            <span class="nx-hint" style="margin:0;background:#1b2330;padding:2px 7px;border-radius:6px">
+                                {b.label}: {b.noop ? "без клика" : (b.x != null ? `(${b.x}, ${b.y})` : "нет точки")}
+                            </span>
+                            {#if !b.noop && b.x != null}<button class="nx-clr" style="padding:1px 7px" on:click={() => showPoint(b.x, b.y)}>показать</button>{/if}
+                        {/each}
                     </div>
                     <div class="nx-row" style="align-items:center;margin-top:4px">
                         <span class="nx-hint" style="margin:0">⏰ ожидается:</span>

@@ -869,6 +869,13 @@ def scn_capture():
         return {"x": None, "y": None, "ts": 0}
     return nox_scenarios.last_captured()
 
+@app.get("/scn_show")
+def scn_show(x: int = 0, y: int = 0):
+    """Показать точку: курсор прыгает в (x,y) без клика (проверка координаты, в т.ч. на др. мониторе)."""
+    if not nox_scenarios:
+        return {"ok": False}
+    return {"ok": nox_scenarios.show_point(x, y)}
+
 @app.get("/scn_schedule")
 def scn_schedule(id: str = "", dt: str = "", prewarm: int = 3):
     """Назначить сценарию время ожидаемого события (МСК). За prewarm минут до —

@@ -19,6 +19,26 @@ MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 VK_F2 = 0x71
 
+# DPI-осознанность: без неё на мониторах с разным масштабом Windows ВИРТУАЛИЗИРУЕТ координаты,
+# и GetCursorPos/SetCursorPos врут -> клик уходит не туда. PER_MONITOR_AWARE_V2 = -4.
+def _enable_dpi_awareness():
+    try:
+        if _user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return "per_monitor_v2"
+    except Exception:
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR
+        return "per_monitor"
+    except Exception:
+        pass
+    try:
+        _user32.SetProcessDPIAware()                     # system-DPI (хуже, но лучше, чем ничего)
+        return "system"
+    except Exception:
+        return "none"
+_DPI_MODE = _enable_dpi_awareness()
+
 STORE = r"C:\jarvis-voice\nox_scenarios.json"
 IPC_HOST, IPC_PORT = "127.0.0.1", 9712
 
@@ -27,6 +47,13 @@ def cursor_pos():
     pt = wintypes.POINT()
     _user32.GetCursorPos(ctypes.byref(pt))
     return (int(pt.x), int(pt.y))
+
+def show_point(x, y):
+    """Переместить курсор в точку (БЕЗ клика) — чтобы пользователь увидел, куда поставил."""
+    try:
+        _user32.SetCursorPos(int(x), int(y)); return True
+    except Exception:
+        return False
 
 def click_at(x, y, restore=True):
     try:
