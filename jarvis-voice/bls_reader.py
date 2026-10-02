@@ -396,13 +396,27 @@ def _check_calendar():
                     _save_state(_ST)
                 break
 
-def _in_release_window():
-    """True, если сейчас в окне [релиз-2мин .. релиз+50мин] любого показателя (когда стоит опрашивать API)."""
-    now = now_msk()
+# Окна опроса вокруг релиза (сек). «fast» — частый опрос для задержки <5с.
+_FAST_PRE, _FAST_POST = 20, 300        # [T-20с .. T+5мин] — быстрый опрос
+_BROAD_PRE, _BROAD_POST = 180, 1800    # [T-3мин .. T+30мин] — умеренный
+
+def _phase():
+    now = now_msk(); broad = False
     for r in _load_schedule():
-        if (r["msk"] - timedelta(minutes=2)) <= now <= (r["msk"] + timedelta(minutes=50)):
-            return True
-    return False
+        d = (r["msk"] - now).total_seconds()   # >0 до релиза, <0 после
+        if -_FAST_POST <= d <= _FAST_PRE:
+            return "fast"
+        if -_BROAD_POST <= d <= _BROAD_PRE:
+            broad = True
+    return "broad" if broad else "idle"
+
+def _interval():
+    p = _phase()
+    if p == "fast":
+        return 2 if _key() else 20   # без ключа 2с нельзя (лимит 25/сутки) -> 20с
+    if p == "broad":
+        return 30
+    return 3 * 3600
 
 # ------------------------------------------------------------------ монитор
 def _monitor_loop():
@@ -415,15 +429,12 @@ def _monitor_loop():
         try:
             if _mon_enabled():
                 _check_calendar()
-                in_win = _in_release_window()
-                since = time.time() - _state.get("last_poll", 0)
-                # в окне релиза опрашиваем часто (раз в ~90с), иначе — раз в ~3 часа (контроль)
-                if (in_win and since > 85) or (not in_win and since > 3 * 3600):
+                if time.time() - _state.get("last_poll", 0) >= _interval():
                     _api_poll()
                     _check_facts(announce=True)
         except Exception as e:
             _state.update(ok=False, err=str(e))
-        time.sleep(30)
+        time.sleep(1)   # быстрый тик: в окне релиза ловим факт за секунды
 
 # ------------------------------------------------------------------ HTTP API
 @app.on_event("startup")

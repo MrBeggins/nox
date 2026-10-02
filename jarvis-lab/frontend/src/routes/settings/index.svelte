@@ -229,6 +229,12 @@
     async function showAll(id: string) {
         try { await invoke("scn_show_all", { id }) } catch (e) {}
     }
+    async function testScn(s: any) {
+        try {
+            const r = parseReader(await invoke<string>("scn_test", { id: s.id, value: String(s._tv ?? "") }))
+            s._tmsg = (r && r.text) ? r.text : "готово"; scnList = scnList
+        } catch (e) { s._tmsg = "ошибка теста"; scnList = scnList }
+    }
     async function saveScn() {
         if (!parsed) return
         // координаты нужны только веткам с ДЕЙСТВИЕМ (noop — без клика)
@@ -915,6 +921,13 @@
                         <span class="nx-hint" style="margin:0">мин до</span>
                         <button class="nx-btn" on:click={() => setSchedule(s)}>назначить</button>
                         {#if s.schedule_dt}<span class="nx-hint" style="margin:0;color:#7fd1a0">✓ {s.schedule_dt}</span>{/if}
+                    </div>
+                    <div class="nx-row" style="align-items:center;margin-top:4px">
+                        <span class="nx-hint" style="margin:0">🧪 тест: значение</span>
+                        <input class="nx-in" type="number" style="max-width:110px" placeholder="напр. 180"
+                               value={s._tv ?? ""} on:input={(e) => s._tv = e.currentTarget.value} />
+                        <button class="nx-btn" on:click={() => testScn(s)}>прогнать</button>
+                        {#if s._tmsg}<span class="nx-hint" style="margin:0;color:#8ab4ff">{s._tmsg}</span>{/if}
                     </div>
                 {/each}
             </div>

@@ -900,6 +900,13 @@ def scn_show_all(id: str = ""):
            if not b.get("noop") and b.get("x") is not None]
     return {"ok": _spawn_marker(pts), "count": len(pts)}
 
+@app.get("/scn_test")
+def scn_test(id: str = "", value: str = ""):
+    """Тест сценария: подставить значение, выбрать ветку и кликнуть (проверка без ожидания новости)."""
+    if not nox_scenarios:
+        return {"ok": False, "text": "Сценарии недоступны."}
+    return nox_scenarios.test_fire(id, value)
+
 @app.get("/scn_schedule")
 def scn_schedule(id: str = "", dt: str = "", prewarm: int = 3):
     """Назначить сценарию время ожидаемого события (МСК). За prewarm минут до —

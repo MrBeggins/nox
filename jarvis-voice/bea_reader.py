@@ -376,13 +376,27 @@ def _check_calendar():
                     _save_state(_ST)
                 break
 
-def _in_release_window():
-    """Опрос API стартует ЗА 1 МИНУТУ до релиза и держится до +40 мин."""
-    now = now_msk()
+# Окна опроса (сек). «fast» — частый опрос для задержки <5с (лимит BEA ~100/мин позволяет 2с).
+_FAST_PRE, _FAST_POST = 60, 300        # [T-1мин .. T+5мин]
+_BROAD_PRE, _BROAD_POST = 300, 2400    # [T-5мин .. T+40мин]
+
+def _phase():
+    now = now_msk(); broad = False
     for r in _load_schedule():
-        if (r["msk"] - timedelta(minutes=1)) <= now <= (r["msk"] + timedelta(minutes=40)):
-            return True
-    return False
+        d = (r["msk"] - now).total_seconds()
+        if -_FAST_POST <= d <= _FAST_PRE:
+            return "fast"
+        if -_BROAD_POST <= d <= _BROAD_PRE:
+            broad = True
+    return "broad" if broad else "idle"
+
+def _interval():
+    p = _phase()
+    if p == "fast":
+        return 2
+    if p == "broad":
+        return 30
+    return 6 * 3600
 
 # ------------------------------------------------------------------ монитор
 def _monitor_loop():
@@ -395,16 +409,12 @@ def _monitor_loop():
         try:
             if _mon_enabled():
                 _check_calendar()
-                if _key():
-                    in_win = _in_release_window()
-                    since = time.time() - _state.get("last_poll", 0)
-                    # в окне релиза — раз в ~10с (лимит BEA ~100/мин), иначе — раз в 6ч
-                    if (in_win and since > 10) or (not in_win and since > 6 * 3600):
-                        _api_poll()
-                        _check_facts(announce=True)
+                if _key() and (time.time() - _state.get("last_poll", 0) >= _interval()):
+                    _api_poll()
+                    _check_facts(announce=True)
         except Exception as e:
             _state.update(ok=False, err=str(e))
-        time.sleep(8)
+        time.sleep(1)   # быстрый тик
 
 # ------------------------------------------------------------------ HTTP API
 @app.on_event("startup")

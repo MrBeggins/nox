@@ -362,6 +362,29 @@ def on_news(items):
     if changed:
         save(cfg)
 
+# ------------------------------------------------------------------ тест сценария (без ожидания новости)
+def test_fire(scenario_id, value):
+    """Прогнать сценарий с заданным значением: выбрать ветку и КЛИКНУТЬ (или noop). Для проверки координат."""
+    cfg = load()
+    sc = next((s for s in cfg.get("scenarios", []) if str(s.get("id")) == str(scenario_id)), None)
+    if not sc:
+        return {"ok": False, "text": "Сценарий не найден, сэр."}
+    try:
+        val = float(str(value).replace(",", "."))
+    except Exception:
+        val = None
+    branch = next((b for b in sc.get("branches", []) if _branch_match(b, val)), None)
+    if not branch:
+        return {"ok": False, "text": f"Для значения {value} нет подходящей ветки."}
+    if branch.get("noop"):
+        return {"ok": True, "noop": True,
+                "text": f"Тест: {value} → «{branch['label']}» (без действий, клика нет)."}
+    if branch.get("x") is None:
+        return {"ok": False, "text": f"У ветки «{branch['label']}» не задана координата."}
+    click_at(branch["x"], branch["y"])
+    return {"ok": True, "label": branch["label"], "x": branch["x"], "y": branch["y"],
+            "text": f"Тест: {value} → клик по «{branch['label']}» ({branch['x']}, {branch['y']})."}
+
 # ------------------------------------------------------------------ планировщик ожидаемых событий
 # У сценария могут быть поля: schedule_dt "YYYY-MM-DD HH:MM" (МСК) и prewarm_min (по умолч. 3).
 # За prewarm_min до времени: анонс + прогрев Claude + окно, в котором мозг = Claude (с откатом).

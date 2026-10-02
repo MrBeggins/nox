@@ -131,6 +131,7 @@ fn main() {
             tauri_commands::scn_schedule,
             tauri_commands::scn_show,
             tauri_commands::scn_show_all,
+            tauri_commands::scn_test,
             tauri_commands::scn_brain,
 
             // Russian Magellan (order flow)
