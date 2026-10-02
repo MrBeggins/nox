@@ -26,7 +26,8 @@ def _port_up(port, host="127.0.0.1", timeout=1.5):
 def _proc_running(image):
     try:
         out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {image}", "/NH"],
-                             capture_output=True, text=True, timeout=10).stdout
+                             capture_output=True, text=True, timeout=10,
+                             creationflags=CREATE_NO_WINDOW).stdout
         return image.lower() in out.lower()
     except Exception:
         return False
@@ -103,26 +104,30 @@ GRACE = {"tts": 70, "yandex": 25, "app": 20, "gui": 15, "ollama": 20,
 def _grace_ok(key):
     return time.time() - _last_start.get(key, 0) > GRACE.get(key, GRACE["default"])
 
+_TTS_SCRIPT = None
 def _tts_script():
-    """Выбор движка голоса: файл tts_engine.txt ('silero'/'f5'); по умолчанию — Silero,
-    если нет NVIDIA-видеокарты (CPU-ноут), иначе F5."""
+    """Выбор движка голоса: файл tts_engine.txt ('silero'/'f5'); иначе автодетект NVIDIA.
+    Результат кешируется (не дёргаем nvidia-smi каждый тик → без мельканий консоли)."""
+    global _TTS_SCRIPT
+    if _TTS_SCRIPT:
+        return _TTS_SCRIPT
     try:
         eng = open(r"C:\jarvis-voice\tts_engine.txt", encoding="utf-8").read().strip().lower()
     except Exception:
         eng = ""
     if eng == "silero":
-        return "tts_silero_server.py"
-    if eng == "f5":
-        return "tts_server.py"
-    # авто: есть ли nvidia-smi?
-    try:
-        import shutil, subprocess
-        if shutil.which("nvidia-smi"):
-            subprocess.run(["nvidia-smi"], capture_output=True, timeout=5)
-            return "tts_server.py"
-    except Exception:
-        pass
-    return "tts_silero_server.py"
+        _TTS_SCRIPT = "tts_silero_server.py"
+    elif eng == "f5":
+        _TTS_SCRIPT = "tts_server.py"
+    else:
+        _TTS_SCRIPT = "tts_server.py"  # по умолчанию F5
+        try:
+            import shutil
+            if not shutil.which("nvidia-smi"):
+                _TTS_SCRIPT = "tts_silero_server.py"  # нет GPU -> Silero
+        except Exception:
+            pass
+    return _TTS_SCRIPT
 
 def _tick():
     restarted = []

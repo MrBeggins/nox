@@ -12,6 +12,11 @@
 //!   JARVIS_TTS_RATE  WinRT speaking rate 0.5..6.0 (default: natural, ~1.0)
 
 use std::process::{Command, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+/// Не создавать окно консоли при запуске powershell (иначе из GUI-процесса мелькает cmd).
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const SPEAK_PS1: &str = include_str!("speak.ps1");
 const SPEAK_F5_PS1: &str = include_str!("speak_f5.ps1");
@@ -53,6 +58,8 @@ fn speak_f5(txt_path: &std::path::Path, tmp: &std::path::Path, nfe: Option<u32>,
     if let Some(s) = speed {
         cmd.env("JARVIS_TTS_SPEED", format!("{}", s));
     }
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
     matches!(cmd.status(), Ok(s) if s.success())
 }
 
@@ -176,8 +183,8 @@ pub fn speak_nfe(text: &str, nfe: Option<u32>, speed: Option<f32>) {
     let voice = std::env::var("JARVIS_TTS_VOICE").unwrap_or_else(|_| "Pavel".to_string());
     let rate = std::env::var("JARVIS_TTS_RATE").unwrap_or_default();
 
-    let status = Command::new("powershell")
-        .args([
+    let mut cmd = Command::new("powershell");
+    cmd.args([
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
@@ -189,8 +196,10 @@ pub fn speak_nfe(text: &str, nfe: Option<u32>, speed: Option<f32>) {
         .env("JARVIS_TTS_RATE", rate)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let status = cmd.status();
 
     match status {
         Ok(s) if s.success() => {}
