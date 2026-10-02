@@ -18,6 +18,10 @@ try:
     import nox_scenarios
 except Exception:
     nox_scenarios = None
+try:
+    import nox_calendar
+except Exception:
+    nox_calendar = None
 
 CDP_URL = "http://127.0.0.1:9222"
 TERMINAL_MATCH = "tbank.ru"
@@ -558,6 +562,8 @@ app = FastAPI(title="Jarvis Terminal Reader")
 @app.on_event("startup")
 def _startup():
     start_worker()
+    _start_cal_loop()
+    _start_cal_arm_loop()
 
 @app.get("/health")
 def health():
@@ -573,6 +579,148 @@ def news(n: int = 5):
         return {"text": f"Не смог прочитать новости, сэр. {err or ''}".strip()}
     top = items[:max(1, min(n, 15))]
     return {"text": chr(10).join(top), "items": top}
+
+_PROBE_JS = r"""
+() => {
+  const res = {groups:0, items:0, classes:{}, timeHits:[], usHits:[], econ:[]};
+  // счётчики по текущему виджету
+  res.groups = document.querySelectorAll('.mind-events-date-group').length;
+  res.items  = document.querySelectorAll('.mind-event-item-new').length;
+  // ищем элементы с временем HH:MM и/или упоминанием США/макро
+  const all = document.querySelectorAll('div,li,tr,span');
+  let n=0;
+  for (const el of all) {
+    const t=(el.innerText||'').replace(/\s+/g,' ').trim();
+    if(!t || t.length>160) continue;
+    if(/\b\d{1,2}:\d{2}\b/.test(t) && (res.timeHits.length<12)) res.timeHits.push(t.slice(0,120));
+    if(/(сша|u\.s|нонфарм|nonfarm|ввп|gdp|инфляц|cpi|ставка|фрс|fomc|запас|нефт|газ)/i.test(t) && res.usHits.length<15) res.usHits.push(t.slice(0,120));
+    if(n++>4000) break;
+  }
+  // классы контейнеров, похожих на календарь/экономику
+  for (const el of document.querySelectorAll('[class*=calend],[class*=event],[class*=econom],[class*=macro]')) {
+    const c = (el.className||'').toString().slice(0,80);
+    if(c) res.classes[c]=(res.classes[c]||0)+1;
+    if(Object.keys(res.classes).length>40) break;
+  }
+  return res;
+}
+"""
+# ------------------------------------------------------------------ авто-календарь (утренний импорт)
+def _cal_fetch_raw():
+    if not _state["ok"]:
+        return None, _state["err"] or "терминал не подключён"
+    return _submit(lambda pg: pg.evaluate(CAL_JS))
+
+def _cal_import_and_digest(announce=True):
+    if not nox_calendar:
+        return {"ok": False, "text": "Календарь-модуль недоступен."}
+    raw, err = _cal_fetch_raw()
+    if err or raw is None:
+        return {"ok": False, "text": f"Не смог прочитать календарь: {err or ''}".strip()}
+    evs = nox_calendar.ingest(raw)
+    today = nox_calendar.today_events()
+    digest = nox_calendar.digest_text(today)
+    try:
+        if nox_scenarios:
+            nox_scenarios._log(f"КАЛЕНДАРЬ импортирован: всего ключевых {len(evs)}, сегодня {len(today)}. {digest}")
+    except Exception:
+        pass
+    if announce:
+        _ipc_announce(digest)
+    return {"ok": True, "imported": len(evs), "today": len(today), "text": digest, "events": evs}
+
+_cal_loop_started = False
+def _start_cal_loop():
+    global _cal_loop_started
+    if _cal_loop_started:
+        return
+    _cal_loop_started = True
+    def loop():
+        import time as _t
+        _t.sleep(30)                       # дать терминалу подключиться
+        try: _cal_import_and_digest(announce=False)   # первый импорт тихо
+        except Exception: pass
+        last_day = ""
+        while True:
+            try:
+                now = nox_calendar.now_msk() if nox_calendar else None
+                if now:
+                    # утренний импорт+дайджест раз в день в ~08:00 МСК
+                    if now.hour >= 8 and now.strftime("%Y-%m-%d") != last_day:
+                        last_day = now.strftime("%Y-%m-%d")
+                        _cal_import_and_digest(announce=True)
+            except Exception:
+                pass
+            _t_sleep = 300
+            import time as _t; _t.sleep(_t_sleep)
+    threading.Thread(target=loop, daemon=True).start()
+
+_cal_arm_started = False
+def _start_cal_arm_loop():
+    """За ~3 мин до КАЖДОГО timed-события календаря (FOMC, PMI, инфляция и т.п.) —
+    активировать гонку источников + прогрев + анонс. Сам факт ловится лентой/сценариями."""
+    global _cal_arm_started
+    if _cal_arm_started or not nox_calendar:
+        return
+    _cal_arm_started = True
+    def loop():
+        import time as _t
+        fired = set()
+        while True:
+            try:
+                now = nox_calendar.now_msk()
+                for e in nox_calendar.today_events():
+                    tm = e.get("time")
+                    if not tm:
+                        continue
+                    try:
+                        hh, mm = tm.split(":")
+                        evt = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+                    except Exception:
+                        continue
+                    mins = (evt - now).total_seconds() / 60.0
+                    key = e.get("date", "") + tm + e.get("text", "")[:25]
+                    if 0 < mins <= 3 and key not in fired:
+                        fired.add(key)
+                        if nox_scenarios:
+                            try: nox_scenarios.arm_window(360)
+                            except Exception: pass
+                        _ipc_announce(f"Через {max(1, int(round(mins)))} минут — "
+                                      f"{e.get('text', 'событие')[:90]}, сэр. Готовлюсь.")
+            except Exception:
+                pass
+            _t.sleep(40)
+    threading.Thread(target=loop, daemon=True).start()
+
+@app.get("/cal_import")
+def cal_import():
+    """Прочитать календарь сейчас, импортировать ключевые события, вернуть дайджест (без озвучки)."""
+    return _cal_import_and_digest(announce=False)
+
+@app.get("/cal_today")
+def cal_today():
+    if not nox_calendar:
+        return {"events": []}
+    ev = nox_calendar.today_events()
+    return {"events": ev, "text": nox_calendar.digest_text(ev)}
+
+@app.get("/cal_digest")
+def cal_digest():
+    """Озвучить дайджест календаря на сегодня."""
+    if not nox_calendar:
+        return {"ok": False}
+    ev = nox_calendar.today_events()
+    d = nox_calendar.digest_text(ev)
+    _ipc_announce(d)
+    return {"ok": True, "text": d}
+
+@app.get("/dom_probe")
+def dom_probe():
+    """ВРЕМЕННЫЙ диагностический: найти, где в DOM висят US/макро-события и есть ли время."""
+    if not _state["ok"]:
+        return {"text": _state["err"] or "терминал не подключён"}
+    res, err = _submit(lambda pg: pg.evaluate(_PROBE_JS))
+    return {"err": err, "res": res}
 
 @app.get("/events")
 def events(q: str = ""):
