@@ -869,12 +869,36 @@ def scn_capture():
         return {"x": None, "y": None, "ts": 0}
     return nox_scenarios.last_captured()
 
+import subprocess as _subp, sys as _sys
+def _spawn_marker(points):
+    """Показать красные «плюсы» в точках (оверлей nox_marker.py), клико-прозрачно, ~3.5с."""
+    pts = [str(int(v)) for xy in points for v in xy]
+    if not pts:
+        return False
+    try:
+        _subp.Popen([_sys.executable, os.path.join(os.path.dirname(__file__), "nox_marker.py"), *pts],
+                    creationflags=0x08000000, close_fds=True)
+        return True
+    except Exception:
+        return False
+
 @app.get("/scn_show")
 def scn_show(x: int = 0, y: int = 0):
-    """Показать точку: курсор прыгает в (x,y) без клика (проверка координаты, в т.ч. на др. мониторе)."""
+    """Показать точку клика красным «плюсом» на экране (в т.ч. на другом мониторе)."""
+    return {"ok": _spawn_marker([(x, y)])}
+
+@app.get("/scn_show_all")
+def scn_show_all(id: str = ""):
+    """Показать ВСЕ точки сценария сразу (кроме веток «без действий»)."""
     if not nox_scenarios:
         return {"ok": False}
-    return {"ok": nox_scenarios.show_point(x, y)}
+    cfg = nox_scenarios.load()
+    sc = next((s for s in cfg.get("scenarios", []) if s.get("id") == id), None)
+    if not sc:
+        return {"ok": False}
+    pts = [(b["x"], b["y"]) for b in sc.get("branches", [])
+           if not b.get("noop") and b.get("x") is not None]
+    return {"ok": _spawn_marker(pts), "count": len(pts)}
 
 @app.get("/scn_schedule")
 def scn_schedule(id: str = "", dt: str = "", prewarm: int = 3):

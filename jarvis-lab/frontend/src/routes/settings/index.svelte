@@ -226,6 +226,9 @@
     async function showPoint(x: number, y: number) {
         try { await invoke("scn_show", { x: String(x), y: String(y) }) } catch (e) {}
     }
+    async function showAll(id: string) {
+        try { await invoke("scn_show_all", { id }) } catch (e) {}
+    }
     async function saveScn() {
         if (!parsed) return
         // координаты нужны только веткам с ДЕЙСТВИЕМ (noop — без клика)
@@ -891,7 +894,8 @@
                         <span class="dot" class:on={s.enabled}></span>
                         <b style="color:#e9eef6">{s.name || s.instrument}</b>
                         <span class="nx-hint" style="margin:0">{s.instrument} · {s.event} · {s.branches?.length || 0} веток</span>
-                        <button class="nx-clr" style="margin-left:auto" on:click={() => toggleScn(s.id)}>{s.enabled ? "выкл" : "вкл"}</button>
+                        <button class="nx-clr" style="margin-left:auto" on:click={() => showAll(s.id)} title="показать все точки красными плюсами">показать точки</button>
+                        <button class="nx-clr" on:click={() => toggleScn(s.id)}>{s.enabled ? "выкл" : "вкл"}</button>
                         <button class="nx-clr" on:click={() => delScn(s.id)}>удалить</button>
                     </div>
                     <div class="nx-row" style="flex-wrap:wrap;gap:6px;margin:2px 0 0 18px">
