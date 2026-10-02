@@ -1,26 +1,41 @@
 <script lang="ts">
-    // Маленький кружок «!» с всплывающей подсказкой при наведении.
-    // Использует position:fixed, чтобы подсказку не обрезали контейнеры со скроллом.
+    import { tick } from "svelte"
+    // Кружок «!» со всплывающей подсказкой. position:fixed + измерение после показа
+    // и ПРИЖАТИЕ в пределах экрана, чтобы подсказка не вылезала за край.
     export let text: string = ""
     let show = false
-    let x = 0, y = 0, above = true
+    let placed = false
+    let tipEl: HTMLElement
+    let left = 0, top = 0
+    let dotRect: { cx: number; top: number; bottom: number } | null = null
 
-    function place(el: HTMLElement) {
-        const r = el.getBoundingClientRect()
-        x = r.left + r.width / 2
-        above = r.top > 150            // если места сверху мало — показать снизу
-        y = above ? r.top - 8 : r.bottom + 8
-        show = true
+    async function enter(e: MouseEvent | FocusEvent) {
+        const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+        dotRect = { cx: r.left + r.width / 2, top: r.top, bottom: r.bottom }
+        show = true; placed = false
+        await tick()
+        position()
     }
-    function enter(e: MouseEvent | FocusEvent) { place(e.currentTarget as HTMLElement) }
-    function leave() { show = false }
+    function position() {
+        if (!tipEl || !dotRect) return
+        const w = tipEl.offsetWidth, h = tipEl.offsetHeight
+        const vw = window.innerWidth, vh = window.innerHeight
+        const m = 8
+        left = Math.max(m, Math.min(dotRect.cx - w / 2, vw - w - m))
+        const above = dotRect.top > h + 12
+        top = above ? dotRect.top - h - 6 : dotRect.bottom + 6
+        top = Math.max(m, Math.min(top, vh - h - m))
+        placed = true
+    }
+    function leave() { show = false; placed = false }
 </script>
 
 <span class="idot" on:mouseenter={enter} on:mouseleave={leave} on:focus={enter} on:blur={leave}
       role="button" tabindex="0" aria-label={text}>!</span>
 
 {#if show && text}
-    <span class="itip" class:below={!above} style="left:{x}px;top:{y}px">{text}</span>
+    <span class="itip" bind:this={tipEl}
+          style="left:{left}px; top:{top}px; visibility:{placed ? 'visible' : 'hidden'}">{text}</span>
 {/if}
 
 <style>
@@ -35,12 +50,10 @@
     .idot:hover, .idot:focus { background: #1b2a3f; outline: none; color: #cfe0ff; }
     .itip {
         position: fixed; z-index: 99999;
-        transform: translate(-50%, -100%);
         max-width: 300px; width: max-content; white-space: normal;
         background: #0f1722; color: #dfe8f3; border: 1px solid #2a3a4f;
         border-radius: 8px; padding: 8px 11px;
         font-size: 12px; font-weight: 400; line-height: 1.45; text-align: left;
         box-shadow: 0 8px 24px rgba(0, 0, 0, .55); pointer-events: none;
     }
-    .itip.below { transform: translate(-50%, 0); }
 </style>
