@@ -132,13 +132,23 @@ def _http_json(url, body, headers, timeout=25):
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers)
     return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8"))
 
+_OLLAMA_MODEL = "qwen2.5:3b"
 def _ollama(system, user, max_tokens):
     r = _http_json("http://127.0.0.1:11434/v1/chat/completions",
-                   {"model": "qwen2.5:3b", "messages": [{"role": "system", "content": system},
+                   {"model": _OLLAMA_MODEL, "messages": [{"role": "system", "content": system},
                     {"role": "user", "content": user}], "stream": False, "temperature": 0,
-                    "max_tokens": max_tokens, "keep_alive": "30m"},
+                    "max_tokens": max_tokens, "keep_alive": -1},   # -1: держать в VRAM всегда (без холодного старта)
                    {"Content-Type": "application/json"})
     return r["choices"][0]["message"]["content"]
+
+def warm_ollama():
+    """Загрузить модель в VRAM заранее (чтобы на событии не было холодного старта ~5с)."""
+    try:
+        _http_json("http://127.0.0.1:11434/api/generate",
+                   {"model": _OLLAMA_MODEL, "prompt": "ок", "stream": False, "keep_alive": -1},
+                   {"Content-Type": "application/json"}, timeout=60)
+    except Exception:
+        pass
 
 def _claude(system, user, max_tokens, key):
     r = _http_json("https://api.anthropic.com/v1/messages",
@@ -177,33 +187,72 @@ def _claude_cli(system, user, max_tokens, model="haiku"):
         raise RuntimeError("claude cli: " + (out or (p.stderr or "")[:120] or "empty"))
     return out
 
-_force_claude_until = 0.0   # до этого времени (unix) в окне события предпочитаем Claude
+_force_claude_until = 0.0   # до этого времени (unix) окно события -> ГОНКА всех источников
+
+# -------- лог (чтобы «по логам посмотреть», кто быстрее и что извлекли) --------
+_LOG = r"C:\jarvis-voice\nox_scenarios.log"
+def _log(msg):
+    try:
+        with open(_LOG, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + str(msg) + "\n")
+    except Exception:
+        pass
+
+def _sources(cfg, racing):
+    """Список (имя, функция) источников. В окне события — ВСЕ доступные (гонка);
+    вне окна — выбранный мозг, затем Ollama как откат."""
+    key = cfg.get("claude_key"); okey = cfg.get("openai_key")
+    model = cfg.get("claude_cli_model", "haiku")
+    cli_on = (cfg.get("brain") == "claude_cli") or cfg.get("claude_cli_enabled", False)
+    oll = ("ollama", lambda s, u, m: _ollama(s, u, m))
+    cli = ("claude_cli", lambda s, u, m: _claude_cli(s, u, m, model))
+    api = ("claude_api", lambda s, u, m: _claude(s, u, m, key))
+    oai = ("openai", lambda s, u, m: _openai(s, u, m, okey))
+    if racing:
+        srcs = [oll]
+        if cli_on: srcs.append(cli)
+        if key:    srcs.append(api)
+        if okey:   srcs.append(oai)
+        return srcs
+    b = cfg.get("brain", "ollama")
+    if cli_on:          return [cli, oll]
+    if b == "claude" and key:  return [api, oll]
+    if b == "openai" and okey: return [oai, oll]
+    return [oll]
 
 def _llm(system, user, max_tokens=120):
+    """В окне события — ГОНКА источников (первый валидный ответ побеждает, остальные логируются).
+    Вне окна — выбранный мозг с откатом на Ollama."""
     cfg = load()
-    b = cfg.get("brain", "ollama")
-    key = cfg.get("claude_key")
-    cli_on = (b == "claude_cli") or cfg.get("claude_cli_enabled", False)
-    model = cfg.get("claude_cli_model", "haiku")
-    in_window = time.time() < _force_claude_until
-    # Выбран Claude ИЛИ окно ожидаемого события -> пробуем Claude: сначала подписку (CLI), потом ключ.
-    if b in ("claude", "claude_cli") or in_window:
-        if cli_on:
+    racing = time.time() < _force_claude_until
+    srcs = _sources(cfg, racing)
+    if not racing or len(srcs) <= 1:
+        for name, fn in srcs:
             try:
-                return _claude_cli(system, user, max_tokens, model)
+                return fn(system, user, max_tokens)
             except Exception:
-                pass
-        if key:
-            try:
-                return _claude(system, user, max_tokens, key)
-            except Exception:
-                pass
-    if b == "openai" and cfg.get("openai_key"):
+                continue
+        return _ollama(system, user, max_tokens)
+    # --- гонка ---
+    import queue
+    q = queue.Queue(); t0 = time.time()
+    def run(name, fn):
         try:
-            return _openai(system, user, max_tokens, cfg["openai_key"])
-        except Exception:
-            pass
-    return _ollama(system, user, max_tokens)   # универсальный откат
+            r = fn(system, user, max_tokens)
+            q.put((name, r, time.time() - t0, None))
+        except Exception as e:
+            q.put((name, None, time.time() - t0, str(e)[:70]))
+    for nm, fn in srcs:
+        threading.Thread(target=run, args=(nm, fn), daemon=True).start()
+    winner, logs = None, []
+    for _ in range(len(srcs)):
+        name, res, dt, err = q.get()
+        logs.append(f"{name} {dt:.2f}s" + ("" if res else f"✗({err})"))
+        if res and winner is None:
+            winner = (name, res, dt)
+            break
+    _log(f"RACE «{user[:45]}» -> {('ПОБЕДИЛ '+winner[0]+f' {winner[2]:.2f}s') if winner else 'НЕТ ОТВЕТА'} | " + ", ".join(logs))
+    return winner[1] if winner else _ollama(system, user, max_tokens)
 
 def _json_from(text):
     if not text:
@@ -320,6 +369,48 @@ def _branch_match(b, val):
         return mx is not None and val <= mx
     return False
 
+# ------------------------------------------------------------------ всегда-он: разбор ключевых новостей
+# Для непредвиденных новостей: ловим тип события + тикер + размер. LLM зовём ТОЛЬКО если есть ключевое
+# слово (дешёвая проверка подстрокой), чтобы не грузить мозг на каждой новости.
+_EVENT_KW = {
+    "дивиденд":   ["дивиденд"],
+    "оферта":     ["оферт"],
+    "допэмиссия": ["допэмисс", "доп. эмисс", "доп эмисс", "дополнительн эмисс", "spo", "размещени акц"],
+    "дефолт":     ["дефолт", "не исполнил обязат", "техдефолт", "технический дефолт"],
+    "выкуп":      ["выкуп", "buyback", "обратный выкуп"],
+}
+_EXTRACT_NEWS_SYS = (
+    "Из новости извлеки СТРОГИЙ JSON без пояснений:\n"
+    "{\"type\":\"<дивиденд|оферта|допэмиссия|дефолт|выкуп|другое>\","
+    "\"ticker\":\"<тикер или короткое имя компании>\","
+    "\"value\":\"<сумма/цена/размер с единицей, или пусто>\"}\n"
+    "Примеры:\n"
+    "«Совет директоров Новатэка рекомендовал дивиденды 35 руб/акция» => "
+    "{\"type\":\"дивиденд\",\"ticker\":\"Новатэк\",\"value\":\"35 руб\"}\n"
+    "«Сегежа объявила оферту по цене 1,8 руб» => {\"type\":\"оферта\",\"ticker\":\"Сегежа\",\"value\":\"1,8 руб\"}\n"
+    "«ВТБ допэмиссия на 90 млрд руб» => {\"type\":\"допэмиссия\",\"ticker\":\"ВТБ\",\"value\":\"90 млрд руб\"}\n"
+    "«Технический дефолт по облигациям Роснано» => {\"type\":\"дефолт\",\"ticker\":\"Роснано\",\"value\":\"\"}"
+)
+def extract_event(text):
+    """Если в новости есть ключевое событие — вернуть {type,ticker,value}, иначе None."""
+    low = (text or "").lower()
+    typ = next((t for t, kws in _EVENT_KW.items() if any(k in low for k in kws)), None)
+    if not typ:
+        return None
+    j = _json_from(_llm(_EXTRACT_NEWS_SYS, text, max_tokens=90)) or {}
+    out = {"type": j.get("type") or typ, "ticker": (j.get("ticker") or "").strip(),
+           "value": (j.get("value") or "").strip()}
+    _log(f"СОБЫТИЕ {out['type']}: тикер={out['ticker'] or '?'} размер={out['value'] or '?'} | {text[:60]}")
+    return out
+
+def speak_event(ev):
+    t, tk, v = ev.get("type"), ev.get("ticker") or "", ev.get("value") or ""
+    if t == "дефолт":
+        return f"Внимание: дефолт, {tk}.".strip()
+    head = {"дивиденд": "Дивиденды", "оферта": "Оферта", "допэмиссия": "Допэмиссия",
+            "выкуп": "Выкуп"}.get(t, "Событие")
+    return f"{head} {tk}: {v}.".replace(" :", ":").strip() if v else f"{head} {tk}.".strip()
+
 # ------------------------------------------------------------------ движок: новость -> клик
 _COOLDOWN = 6 * 3600  # не повторять один сценарий чаще раза в 6 часов
 
@@ -345,17 +436,24 @@ def on_news(items):
                 continue
             if ev and ev not in low:
                 continue
+            _t0 = time.time()
             val = _extract_value(it.get("text", ""), ev)
             branch = next((b for b in branches if _branch_match(b, val)), None)
+            _dt = (time.time() - _t0) * 1000
             if not branch:
+                _log(f"СЦЕНАРИЙ «{sc.get('name','')}»: совпало «{it.get('text','')[:50]}», значение={val}, "
+                     f"ветки нет ({_dt:.0f}мс)")
                 continue
             sc["fired_ts"] = time.time(); changed = True
             vtxt = ("нет" if val == 0 else "не указан" if val is None
                     else (str(int(val)) if val == int(val) else str(val)))
             if branch.get("noop"):
+                _log(f"СЦЕНАРИЙ «{sc.get('name','')}»: значение={val} -> «{branch['label']}» БЕЗ КЛИКА ({_dt:.0f}мс)")
                 _announce(f"{ev} {vtxt} — в заданном диапазоне, действий не требуется, сэр.")
             else:
                 click_at(branch["x"], branch["y"])
+                _log(f"СЦЕНАРИЙ «{sc.get('name','')}»: значение={val} -> КЛИК «{branch['label']}» "
+                     f"({branch['x']},{branch['y']}) за {_dt:.0f}мс от новости")
                 _announce(f"Сценарий {sc.get('name','')}: открыл {branch.get('label','стакан')}. "
                           f"{ev} {vtxt}. Проверьте и жмите, сэр.")
             break
@@ -425,6 +523,11 @@ def set_schedule(scenario_id, dt_str, prewarm_min=3):
                                         f"{d.strftime('%d.%m в %H:%M')}, мозг подготовлю за {sc['prewarm_min']} мин."}
     return {"ok": False, "text": "Такой сценарий не найден, сэр."}
 
+def _prime_all(cfg):
+    """Прогреть ВСЕ источники перед событием: Ollama (в VRAM) + Claude (соединение)."""
+    threading.Thread(target=warm_ollama, daemon=True).start()
+    _prime_claude(cfg)
+
 def _prime_claude(cfg):
     # прогрев соединения/сессии: подписка (CLI) или ключ
     try:
@@ -454,7 +557,7 @@ def _scheduler_loop():
                 # разовый прогрев + анонс в момент наступления T-pre
                 if 0 < secs <= pre and not sc.get("_prewarmed"):
                     sc["_prewarmed"] = True; changed = True
-                    _prime_claude(cfg)
+                    _prime_all(cfg)   # прогреть Ollama (VRAM) + Claude перед событием
                     mins = max(1, int(round(secs / 60)))
                     _announce(f"Готовлюсь, сэр: через {mins} мин — "
                               f"{sc.get('name') or sc.get('event') or 'событие'}. Мозг наготове.")
@@ -472,6 +575,7 @@ def start_scheduler():
     global _sched_started
     if not _sched_started:
         _sched_started = True
+        threading.Thread(target=warm_ollama, daemon=True).start()   # прогреть модель сразу при старте
         threading.Thread(target=_scheduler_loop, daemon=True).start()
 
 if __name__ == "__main__":

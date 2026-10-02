@@ -510,18 +510,26 @@ def _monitor_loop():
                     nox_scenarios.on_news(new_items)
                 except Exception:
                     pass
-            # Озвучка новостей — только если монитор включён.
-            if _mon_enabled():
-                for it in reversed(new_items):  # в хронологическом порядке
+            # Всегда-он разбор ключевых событий (дивиденд/оферта/допэмиссия/дефолт/выкуп):
+            # тикер+размер ловим и ЛОГИРУЕМ всегда; озвучиваем при включённом мониторе.
+            for it in reversed(new_items):      # в хронологическом порядке
+                ev = None
+                try:
+                    import nox_scenarios as _ns
+                    ev = _ns.extract_event(it.get("text", ""))
+                except Exception:
+                    ev = None
+                if ev:
+                    if _mon_enabled():
+                        _ipc_announce(_ns.speak_event(ev)); time.sleep(0.4)
+                    continue                     # ключевое событие уже обработано
+                if _mon_enabled():               # прочие новости — прежняя логика
                     if smart:
                         say = _ollama_judge(it.get("text", ""))
                         if say:
-                            _ipc_announce(say)
-                            time.sleep(0.4)
-                    else:
-                        if _match(it, cfg):
-                            _ipc_announce(_shorten(it))
-                            time.sleep(0.4)
+                            _ipc_announce(say); time.sleep(0.4)
+                    elif _match(it, cfg):
+                        _ipc_announce(_shorten(it)); time.sleep(0.4)
         except Exception:
             pass
         time.sleep(2)
@@ -899,6 +907,19 @@ def scn_show_all(id: str = ""):
     pts = [(b["x"], b["y"]) for b in sc.get("branches", [])
            if not b.get("noop") and b.get("x") is not None]
     return {"ok": _spawn_marker(pts), "count": len(pts)}
+
+@app.get("/scn_inject")
+def scn_inject(text: str = "", tickers: str = ""):
+    """ПРОКЛАДКА для теста: подать виртуальную новость в движок как будто из ленты ТТ,
+    замерить время полной обработки (парсинг -> выбор ветки -> клик). Пишет в nox_scenarios.log."""
+    if not nox_scenarios:
+        return {"ok": False, "text": "Сценарии недоступны."}
+    item = {"text": text, "body": "", "tickers": [t.strip() for t in tickers.split(",") if t.strip()]}
+    t0 = time.time()
+    nox_scenarios.on_news([item])
+    ms = (time.time() - t0) * 1000.0
+    nox_scenarios._log(f"INJECT «{text[:60]}» -> полная обработка {ms:.0f}мс")
+    return {"ok": True, "ms": round(ms), "text": f"Обработано за {ms:.0f} мс."}
 
 @app.get("/scn_test")
 def scn_test(id: str = "", value: str = ""):
