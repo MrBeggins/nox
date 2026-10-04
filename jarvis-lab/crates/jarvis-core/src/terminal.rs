@@ -14,6 +14,8 @@ const MIND_URL: &str = "http://127.0.0.1:8126"; // ридер терминала
 const MAG_URL: &str = "http://127.0.0.1:8127"; // Russian Magellan PRO: order flow MOEX
 const BLS_URL: &str = "http://127.0.0.1:8128"; // BLS: макростатистика США (нонфарм, CPI, PPI, JOLTS)
 const BEA_URL: &str = "http://127.0.0.1:8129"; // BEA: ВВП и PCE США
+const SYS_URL: &str = "http://127.0.0.1:8132"; // монитор нагрузки + открытие программ/сайтов/поиск
+const NOTES_URL: &str = "http://127.0.0.1:8133"; // заметки и напоминания
 
 fn enabled() -> bool {
     crate::DB
@@ -174,9 +176,50 @@ pub fn try_handle(text: &str) -> Option<String> {
         return Some(fetch_mind("/task_samolet", &[("on", "1")]));
     }
 
-    // Календарь-заметки: «запиши / напомни / запланируй / добавь событие …».
+    // ===================== ПОМОЩНИК: монитор ПК / открытие / заметки / напоминания =====================
+    // Нагрузка/производительность компьютера
+    if t.contains("нагрузк") || t.contains("загрузк компьютер") || t.contains("загружен компьютер")
+        || t.contains("производительн") || t.contains("что грузит") || t.contains("загрузка цп")
+        || (t.contains("сколько") && (t.contains("процессор") || t.contains("память") || t.contains("оператив")))
+    {
+        if (t.contains("выключи") || t.contains("отключи") || t.contains("не следи")) && t.contains("нагрузк") {
+            return Some(fetch_at(SYS_URL, "/mon", &[("on", "0")], "монитор"));
+        }
+        if (t.contains("следи") || t.contains("включи")) && t.contains("нагрузк") {
+            return Some(fetch_at(SYS_URL, "/mon", &[("on", "1")], "монитор"));
+        }
+        return Some(fetch_at(SYS_URL, "/stats", &[], "монитор"));
+    }
+
+    // Заметки: «запомни …» / «мои заметки»
+    if t.starts_with("запомни") || t.contains("запомни что") {
+        let body = after_any(&t, &["запомни что", "запомни"]);
+        return Some(fetch_at(NOTES_URL, "/note_add", &[("text", body.trim())], "заметки"));
+    }
+    if (t.contains("мои заметк") || t.contains("покажи заметк") || t.contains("какие заметк")
+        || t.contains("что я просил запомнить") || t.contains("прочитай заметк")) {
+        return Some(fetch_at(NOTES_URL, "/notes", &[], "заметки"));
+    }
+    // Напоминания: «напомни …» / «мои напоминания»
+    if t.contains("мои напоминани") || t.contains("покажи напоминани") || t.contains("какие напоминани") {
+        return Some(fetch_at(NOTES_URL, "/reminders", &[], "напоминания"));
+    }
+    if t.starts_with("напомни") || t.contains("напомни мне") {
+        let body = after_any(&t, &["напомни мне", "напомни"]);
+        return Some(fetch_at(NOTES_URL, "/remind", &[("text", body.trim())], "напоминания"));
+    }
+
+    // Открытие программ / сайтов / веб-поиск: «открой …», «запусти …», «найди …», «загугли …»
+    if t.starts_with("открой") || t.starts_with("запусти") || t.starts_with("найди")
+        || t.starts_with("загугли") || t.starts_with("поиск ") || t.starts_with("открыть")
+    {
+        return Some(fetch_at(SYS_URL, "/open", &[("q", t.as_str())], "система"));
+    }
+    // ===================================================================================================
+
+    // Календарь-заметки: «запиши / запланируй / добавь событие …» (GUI-календарь).
     // Пишем в общий nox_agenda.json (его читает GUI). Только запись, без исполнения.
-    let agenda_trigger = t.contains("напомни") || t.contains("напоминание")
+    let agenda_trigger = t.contains("напоминание")
         || t.contains("запиши") || t.contains("заметк")
         || t.contains("в календарь") || t.contains("в календаре")
         || t.contains("запланируй") || t.contains("план на день") || t.contains("план на неделю")
@@ -544,6 +587,31 @@ fn fetch_bls(path: &str, query: &[(&str, &str)]) -> String {
         Ok(v) => v["text"].as_str().unwrap_or("Пустой ответ, сэр.").to_string(),
         Err(_) => "Статистика США недоступна, сэр. Запущен ли bls_reader?".to_string(),
     }
+}
+
+/// Универсальный GET к локальному сервису-помощнику (монитор/заметки и т.п.): берём поле "text".
+#[cfg(feature = "reqwest")]
+fn fetch_at(base_url: &str, path: &str, query: &[(&str, &str)], label: &str) -> String {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return format!("Сервис ({}) недоступен, сэр.", label),
+    };
+    let url = match reqwest::Url::parse_with_params(&format!("{}{}", base_url, path), query) {
+        Ok(u) => u,
+        Err(_) => return format!("Ошибка адреса ({}), сэр.", label),
+    };
+    match client.get(url).send().and_then(|r| r.json::<serde_json::Value>()) {
+        Ok(v) => v["text"].as_str().unwrap_or("Готово, сэр.").to_string(),
+        Err(_) => format!("Сервис ({}) недоступен, сэр.", label),
+    }
+}
+
+#[cfg(not(feature = "reqwest"))]
+fn fetch_at(_b: &str, _p: &str, _q: &[(&str, &str)], _l: &str) -> String {
+    "Недоступно в этой сборке.".to_string()
 }
 
 #[cfg(not(feature = "reqwest"))]

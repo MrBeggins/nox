@@ -74,7 +74,7 @@ if (-not $mup) {
 }
 
 # 2e) Макростатистика США: BLS (:8128) и BEA (:8129)
-foreach ($svc in @(@{p=8128;s="bls_reader.py";o="bls"}, @{p=8129;s="bea_reader.py";o="bea"}, @{p=8131;s="tg_reader.py";o="tg"})) {
+foreach ($svc in @(@{p=8128;s="bls_reader.py";o="bls"}, @{p=8129;s="bea_reader.py";o="bea"}, @{p=8131;s="tg_reader.py";o="tg"}, @{p=8132;s="sys_monitor.py";o="sys"}, @{p=8133;s="nox_notes.py";o="notes"})) {
     $su = $false
     try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', $svc.p); $c.Close(); $su = $true } catch {}
     if (-not $su) {
