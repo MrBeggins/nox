@@ -5,8 +5,12 @@ author = "Abraham (Priler)"
 languages = ["ru"]
 
 [reactions.ru]
-# app startup
+# app startup — приветствие по времени суток (fallback: greet)
 greet = ["run"]
+greet_morning = ["greet_morning"]
+greet_day = ["greet_day"]
+greet_evening = ["greet_evening"]
+greet_night = ["greet_night"]
 
 # wake word detected
 reply = ["reply1", "reply2", "reply3"]
