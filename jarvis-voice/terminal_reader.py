@@ -528,6 +528,14 @@ def _monitor_loop():
             # Всегда-он разбор ключевых событий (дивиденд/оферта/допэмиссия/дефолт/выкуп):
             # тикер+размер ловим и ЛОГИРУЕМ всегда; озвучиваем при включённом мониторе.
             for it in reversed(new_items):      # в хронологическом порядке
+                low = it.get("text", "").lower()
+                # ПРИОРИТЕТ: валютные операции Минфина — зачитываем заголовок с цифрой ВСЕГДА
+                # (даже если монитор новостей выключен), один раз (дедуп).
+                if (("минфин" in low or "министерство финансов" in low)
+                        and ("валют" in low or "бюджетн" in low)):
+                    if not _is_dup(it.get("text", "")):
+                        _ipc_announce("Минфин, важное. " + _shorten(it)); time.sleep(0.4)
+                    continue
                 ev = None
                 try:
                     import nox_scenarios as _ns
@@ -591,6 +599,20 @@ def news(n: int = 5):
         return {"text": f"Не смог прочитать новости, сэр. {err or ''}".strip()}
     top = items[:max(1, min(n, 15))]
     return {"text": chr(10).join(top), "items": top}
+
+@app.get("/minfin")
+def minfin():
+    """Последняя новость про валютные операции Минфина (для «сколько Минфин купил валюты»)."""
+    if not _state["ok"]:
+        return {"text": _state["err"] or "Терминал ещё не подключён, сэр."}
+    items, err = _submit(lambda pg: pg.evaluate(NEWS_JS))
+    if err or not items:
+        return {"text": f"Не смог прочитать новости, сэр. {err or ''}".strip()}
+    for it in items:
+        low = it.lower()
+        if ("минфин" in low or "министерство финансов" in low) and ("валют" in low or "бюджетн" in low):
+            return {"text": "Минфин. " + it}
+    return {"text": "Пока не вижу данных Минфина по валюте в ленте, сэр."}
 
 _PROBE_JS = r"""
 () => {
