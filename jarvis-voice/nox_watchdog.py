@@ -158,6 +158,10 @@ def _tick():
             pass
     return restarted
 
+def _voice_ready():
+    # голосовой сервер (F5/Silero) слушает 8123 и реально готов отвечать
+    return _port_up(8123)
+
 def main():
     # singleton
     guard = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -165,14 +169,25 @@ def main():
         guard.bind(("127.0.0.1", 8130)); guard.listen(1)
     except OSError:
         print("watchdog already running"); return
-    # первый проход — поднять всё
     time.sleep(2)
+    first = True
     while True:
         done = _tick()
-        if done:
-            # дать подняться и уведомить (если движок жив)
-            time.sleep(8)
+        if first:
+            # ПЕРВЫЙ запуск: молча поднимаем всё, ждём движок + готовый голос (до ~2.5 мин),
+            # затем ОДНА фраза вместо спама «запустил то, запустил это».
+            for _ in range(75):
+                if _port_up(9712) and _voice_ready():
+                    break
+                time.sleep(2)
+            time.sleep(3)   # дать F5 прогреться (первый инференс)
             if _port_up(9712):
+                _announce("Все системы работают в норме, сэр.")
+            first = False
+        elif done:
+            # уже после старта: если что-то упало и поднялось — краткое уведомление (голосом F5)
+            time.sleep(8)
+            if _port_up(9712) and _voice_ready():
                 _announce("Восстановил: " + ", ".join(done) + ".")
         time.sleep(20)
 

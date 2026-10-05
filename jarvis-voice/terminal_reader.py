@@ -117,10 +117,14 @@ def _find_terminal_page(browser):
                 pages.append(pg)
             except Exception:
                 pass
+    # вкладки терминала: оставляем ОДНУ, лишние дубли закрываем (чтобы не плодились)
+    term = [pg for pg in pages if "/terminal" in (pg.url or "")]
+    if term:
+        for extra in term[1:]:
+            try: extra.close()
+            except Exception: pass
+        return term[0]
     # предпочесть именно вкладку терминала (не окно логина id.tbank.ru)
-    for pg in pages:
-        if "/terminal" in (pg.url or ""):
-            return pg
     for pg in pages:
         u = pg.url or ""
         if "tbank.ru" in u and "id.tbank" not in u and "/auth" not in u:

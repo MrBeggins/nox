@@ -183,13 +183,23 @@ def synth(text: str, speed: float = SPEED, nfe: int = NFE) -> bytes:
     with _lock:                          # F5 не потокобезопасен -> один инференс за раз
         for ch in chunks:
             gen = _accent(ch)
+            # финальная пунктуация — иначе F5 «обрывает» последнее слово
+            if gen and gen.rstrip()[-1:] not in ".!?…,;:":
+                gen = gen.rstrip() + "."
             wav, sr, _ = _tts.infer(
                 ref_file=REF_AUDIO, ref_text=REF_TEXT, gen_text=gen,
                 nfe_step=nfe, cfg_strength=2, speed=speed,
                 remove_silence=True, seed=SEED, file_wave=None,
             )
             wav = np.asarray(wav, dtype=np.float32)
-            wav, _ = librosa.effects.trim(wav, top_db=32)
+            # Обрезаем тишину ТОЛЬКО слева; хвост не трогаем (иначе съедается окончание слова).
+            try:
+                _, idx = librosa.effects.trim(wav, top_db=30)
+                wav = wav[idx[0]:]
+            except Exception:
+                pass
+            # небольшой «воздух» в конце куска, чтобы окончание не обрывалось
+            wav = np.concatenate([wav, np.zeros(int(sr * 0.08), dtype=np.float32)])
             parts.append(wav)
             parts.append(np.zeros(int(sr * 0.10), dtype=np.float32))  # пауза между кусками
     wav = np.concatenate(parts) if parts else np.zeros(1, dtype=np.float32)
