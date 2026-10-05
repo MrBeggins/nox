@@ -18,7 +18,7 @@ CNW = 0x08000000  # CREATE_NO_WINDOW
 app = FastAPI()
 _state = {"cpu": 0, "ram": 0, "gpu": None, "top": "", "ts": 0}
 
-_DEF = {"cpu_thr": 90, "ram_thr": 90, "gpu_thr": 95, "sustain": 4, "cooldown": 300, "mon": True}
+_DEF = {"cpu_thr": 90, "ram_thr": 90, "gpu_thr": 95, "sustain": 4, "cooldown": 3600, "mon": True}
 def load():
     try: d = json.load(open(CFG, encoding="utf-8"))
     except Exception: d = {}
