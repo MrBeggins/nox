@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "jarvis-app",
+  "version": "0.0.3",
+  "identifier": "com.priler.jarvis",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npx vite build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../../frontend/dist/client"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "fullscreen": false,
+        "resizable": true,
+        "title": "Nox",
+        "width": 1040,
+        "height": 680,
+        "minWidth": 900,
+        "minHeight": 600
+      },
+      {
+        "label": "overlay",
+        "url": "index.html?overlay=1",
+        "title": "Nox Overlay",
+        "width": 210,
+        "height": 200,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "focus": false,
+        "visible": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "../../resources/icons/32x32.png",
+      "../../resources/icons/128x128.png",
+      "../../resources/icons/128x128@2x.png",
+      "../../resources/icons/icon.icns",
+      "../../resources/icons/icon.ico"
+    ],
+    "targets": "all",
+    "resources": {
+      "../../resources/commands": "resources/commands",
+      "../../resources/sound": "resources/sound",
+      "../../resources/rustpotter": "resources/rustpotter",
+      "../../resources/vosk": "resources/vosk",
+      "../../resources/keywords": "resources/keywords"
+    }
+  }
+}

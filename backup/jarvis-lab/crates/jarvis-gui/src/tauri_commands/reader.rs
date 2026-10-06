@@ -1,0 +1,240 @@
+// Прокси к terminal_reader.py (:8126): фильтр новостей, монитор, живая лента.
+// Держим сеть в Rust, чтобы не упираться в CSP/CORS вебвью.
+const READER: &str = "http://127.0.0.1:8126";
+
+fn get(path: &str, query: &[(&str, &str)]) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = reqwest::Url::parse_with_params(&format!("{}{}", READER, path), query)
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("reader offline: {e}"))?;
+    resp.text().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn reader_filter_get() -> Result<String, String> {
+    get("/filter", &[])
+}
+
+#[tauri::command]
+pub fn reader_filter_add(kind: String, value: String) -> Result<String, String> {
+    get("/filter_add", &[("kind", &kind), ("q", &value)])
+}
+
+#[tauri::command]
+pub fn reader_filter_remove(kind: String, value: String) -> Result<String, String> {
+    get("/filter_remove", &[("kind", &kind), ("q", &value)])
+}
+
+#[tauri::command]
+pub fn reader_filter_clear(kind: String) -> Result<String, String> {
+    get("/filter_clear", &[("kind", &kind)])
+}
+
+#[tauri::command]
+pub fn reader_mon(on: i32) -> Result<String, String> {
+    get("/mon", &[("on", &on.to_string())])
+}
+
+#[tauri::command]
+pub fn reader_news(n: i32) -> Result<String, String> {
+    get("/news", &[("n", &n.to_string())])
+}
+
+#[tauri::command]
+pub fn reader_smart(on: i32) -> Result<String, String> {
+    get("/smart", &[("on", &on.to_string())])
+}
+
+// ---- Сценарии авто-клика (:8126) ----
+#[tauri::command]
+pub fn scn_list() -> Result<String, String> { get("/scn_list", &[]) }
+
+#[tauri::command]
+pub fn scn_parse(text: String) -> Result<String, String> { get("/scn_parse", &[("text", &text)]) }
+
+#[tauri::command]
+pub fn scn_save(json_data: String) -> Result<String, String> { get("/scn_save", &[("json_data", &json_data)]) }
+
+#[tauri::command]
+pub fn scn_del(id: String) -> Result<String, String> { get("/scn_del", &[("id", &id)]) }
+
+#[tauri::command]
+pub fn scn_toggle(id: String) -> Result<String, String> { get("/scn_toggle", &[("id", &id)]) }
+
+#[tauri::command]
+pub fn scn_capture() -> Result<String, String> { get("/scn_capture", &[]) }
+
+#[tauri::command]
+pub fn scn_schedule(id: String, dt: String, prewarm: String) -> Result<String, String> {
+    get("/scn_schedule", &[("id", &id), ("dt", &dt), ("prewarm", &prewarm)])
+}
+
+#[tauri::command]
+pub fn scn_show(x: String, y: String) -> Result<String, String> {
+    get("/scn_show", &[("x", &x), ("y", &y)])
+}
+
+#[tauri::command]
+pub fn scn_show_all(id: String) -> Result<String, String> {
+    get("/scn_show_all", &[("id", &id)])
+}
+
+#[tauri::command]
+pub fn scn_test(id: String, value: String) -> Result<String, String> {
+    get("/scn_test", &[("id", &id), ("value", &value)])
+}
+
+#[tauri::command]
+pub fn scn_brain(brain: String, claude_key: String, openai_key: String) -> Result<String, String> {
+    get("/scn_brain", &[("brain", &brain), ("claude_key", &claude_key), ("openai_key", &openai_key)])
+}
+
+// ---- Наблюдатели «мультимозг» (:8126) ----
+#[tauri::command]
+pub fn watch_list() -> Result<String, String> { get("/watch_list", &[]) }
+
+#[tauri::command]
+pub fn watch_add(name: String, keywords: String, source: String, brain: String,
+                 scenario_id: String, until: String, once: i32) -> Result<String, String> {
+    get("/watch_add", &[("name", &name), ("keywords", &keywords), ("source", &source),
+                        ("brain", &brain), ("scenario_id", &scenario_id), ("until", &until),
+                        ("once", &once.to_string())])
+}
+
+#[tauri::command]
+pub fn watch_voice(text: String) -> Result<String, String> { get("/watch_voice", &[("text", &text)]) }
+
+#[tauri::command]
+pub fn watch_del(id: String) -> Result<String, String> { get("/watch_del", &[("id", &id)]) }
+
+#[tauri::command]
+pub fn watch_toggle(id: String) -> Result<String, String> { get("/watch_toggle", &[("id", &id)]) }
+
+// ---- Выбор голоса: движок (Silero/XTTS) + диктор (:8126) ----
+#[tauri::command]
+pub fn voice_list() -> Result<String, String> { get("/voice_list", &[]) }
+
+#[tauri::command]
+pub fn voice_get() -> Result<String, String> { get("/voice_get", &[]) }
+
+#[tauri::command]
+pub fn voice_set(engine: String, speaker: String) -> Result<String, String> {
+    get("/voice_set", &[("engine", &engine), ("speaker", &speaker)])
+}
+
+#[tauri::command]
+pub fn voice_test(engine: String, speaker: String) -> Result<String, String> {
+    get("/voice_test", &[("engine", &engine), ("speaker", &speaker)])
+}
+
+// ---- Russian Magellan PRO (order flow, :8127) ----
+const MAGELLAN: &str = "http://127.0.0.1:8127";
+
+fn mget(path: &str, query: &[(&str, &str)]) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = reqwest::Url::parse_with_params(&format!("{}{}", MAGELLAN, path), query)
+        .map_err(|e| e.to_string())?;
+    client.get(url).send().map_err(|e| format!("magellan offline: {e}"))?
+        .text().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn magellan_filter_get() -> Result<String, String> { mget("/filter", &[]) }
+
+#[tauri::command]
+pub fn magellan_add(value: String) -> Result<String, String> {
+    mget("/filter_add", &[("kind", "ticker"), ("q", &value)])
+}
+
+#[tauri::command]
+pub fn magellan_remove(value: String) -> Result<String, String> {
+    mget("/filter_remove", &[("kind", "ticker"), ("q", &value)])
+}
+
+#[tauri::command]
+pub fn magellan_clear() -> Result<String, String> { mget("/filter_clear", &[]) }
+
+#[tauri::command]
+pub fn magellan_mon(on: i32) -> Result<String, String> { mget("/mon", &[("on", &on.to_string())]) }
+
+#[tauri::command]
+pub fn magellan_settings(min_imbalance: f64, min_price: f64, min_turnover: f64) -> Result<String, String> {
+    mget("/settings", &[
+        ("min_imbalance", &min_imbalance.to_string()),
+        ("min_price", &min_price.to_string()),
+        ("min_turnover", &min_turnover.to_string()),
+    ])
+}
+
+#[tauri::command]
+pub fn magellan_pulse() -> Result<String, String> { mget("/pulse", &[("n", "5")]) }
+
+// ---- TTS speed (:8123) ----
+const TTS: &str = "http://127.0.0.1:8123";
+
+fn tget(path: &str, query: &[(&str, &str)]) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build().map_err(|e| e.to_string())?;
+    let url = reqwest::Url::parse_with_params(&format!("{}{}", TTS, path), query)
+        .map_err(|e| e.to_string())?;
+    client.get(url).send().map_err(|e| format!("tts offline: {e}"))?
+        .text().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn tts_speed_get() -> Result<String, String> { tget("/speed", &[]) }
+
+#[tauri::command]
+pub fn tts_speed_set(v: f64) -> Result<String, String> { tget("/set_speed", &[("v", &v.to_string())]) }
+
+// ---- Telegram reader (:8131) ----
+const TG: &str = "http://127.0.0.1:8131";
+
+fn gget(path: &str, query: &[(&str, &str)]) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build().map_err(|e| e.to_string())?;
+    let url = reqwest::Url::parse_with_params(&format!("{}{}", TG, path), query)
+        .map_err(|e| e.to_string())?;
+    client.get(url).send().map_err(|e| format!("telegram offline: {e}"))?
+        .text().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn tg_health() -> Result<String, String> { gget("/health", &[]) }
+
+#[tauri::command]
+pub fn tg_dialogs() -> Result<String, String> { gget("/dialogs", &[("limit", "250")]) }
+
+#[tauri::command]
+pub fn tg_chats_set(ids: String) -> Result<String, String> { gget("/chats_set", &[("ids", &ids)]) }
+
+#[tauri::command]
+pub fn tg_filter_get() -> Result<String, String> { gget("/filter_get", &[]) }
+
+#[tauri::command]
+pub fn tg_filter_add(value: String) -> Result<String, String> { gget("/filter_add", &[("q", &value)]) }
+
+#[tauri::command]
+pub fn tg_filter_remove(value: String) -> Result<String, String> { gget("/filter_remove", &[("q", &value)]) }
+
+#[tauri::command]
+pub fn tg_filter_mode(mode: String) -> Result<String, String> { gget("/filter_mode", &[("mode", &mode)]) }
+
+#[tauri::command]
+pub fn tg_creds_set(api_id: String, api_hash: String) -> Result<String, String> {
+    gget("/creds_set", &[("api_id", &api_id), ("api_hash", &api_hash)])
+}
+
+#[tauri::command]
+pub fn tg_mon(on: i32) -> Result<String, String> { gget("/mon", &[("on", &on.to_string())]) }
