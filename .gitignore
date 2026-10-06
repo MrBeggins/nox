@@ -2,7 +2,9 @@
 # Секреты и ключи (НИКОГДА не коммитить)
 jarvis-voice/bea_key.txt
 jarvis-voice/bls_key.txt
+jarvis-voice/apimira_key.txt
 jarvis-voice/nox_scenarios.json
+**/*_key.txt
 **/*.key
 **/*.env
 **/*secret*
