@@ -50,13 +50,16 @@ pub struct Settings {
     #[serde(default)] // false
     pub vision_enabled: bool,
 
-    // ### AI BRAIN (multi-model)
+    // ### AI BRAIN: два варианта — "openai" (облако по API-ключу: openai_url/openai_model/api_key__openai)
+    // или "ollama" (локально и бесплатно: ollama_model). Подписка Claude убрана.
     #[serde(default = "default_brain_backend")]
     pub brain_backend: String,
     #[serde(default)]
     pub openai_url: String,
     #[serde(default)]
     pub openai_model: String,
+    #[serde(default = "default_ollama_model")]
+    pub ollama_model: String,
     /// JSON array of user-defined AI models (name, backend, url, model, key).
     #[serde(default = "default_ai_models")]
     pub ai_models: String,
@@ -69,6 +72,15 @@ pub struct Settings {
     /// T-Invest API токен (только чтение) для чтения портфеля/котировок.
     #[serde(default)]
     pub invest_token: String,
+    /// Голосовое исполнение заявок: Нокс сам жмёт Купить/Продать в виджете. По умолчанию выключено.
+    /// Проверяется в terminal_reader.py прямо перед нажатием (читает app.db с диска).
+    #[serde(default)]
+    pub tterminal_exec_enabled: bool,
+    /// Лимиты одной голосовой заявки: лотов и рублей (0 = без лимита).
+    #[serde(default = "default_exec_max_lots")]
+    pub tterminal_exec_max_lots: u32,
+    #[serde(default = "default_exec_max_rub")]
+    pub tterminal_exec_max_rub: u64,
 
     // ### АКТИВАЦИЯ
     /// Реагировать на слово-активацию (wake word). false -> только хоткей/кнопка/текст.
@@ -79,6 +91,14 @@ pub struct Settings {
     #[serde(default = "default_activation_hotkey")]
     pub activation_hotkey: String,
 
+    // ### СОСТОЯНИЕ ПУЛЬСА (переживает перезапуск)
+    /// Микрофон выключен пользователем: не слушать ни слово, ни хоткей.
+    #[serde(default)]
+    pub mic_muted: bool,
+    /// «Не беспокоить»: не реагировать на голос вокруг и не озвучивать новости.
+    #[serde(default)]
+    pub dnd: bool,
+
     pub api_keys: ApiKeys,
 }
 
@@ -87,9 +107,12 @@ fn default_slots_backend() -> String { config::DEFAULT_SLOTS_BACKEND.to_string()
 fn default_vad_backend() -> String { config::DEFAULT_VAD_BACKEND.to_string() }
 fn default_language() -> String { crate::i18n::detect_system_language().to_string() }
 fn default_true() -> bool { true }
-fn default_brain_backend() -> String { "claude".to_string() }
+fn default_brain_backend() -> String { "openai".to_string() }
+fn default_ollama_model() -> String { "qwen2.5:3b".to_string() }
 fn default_ai_models() -> String { "[]".to_string() }
 fn default_tterminal_url() -> String { "https://www.tbank.ru/invest/terminal/".to_string() }
+fn default_exec_max_lots() -> u32 { 10 }
+fn default_exec_max_rub() -> u64 { 50_000 }
 fn default_wake_word() -> String { "джарвис".to_string() }
 fn default_modes() -> String { "[]".to_string() }
 fn default_activation_hotkey() -> String { "ctrl_alt_j".to_string() }
@@ -126,12 +149,18 @@ impl Settings {
             "brain_backend"             => Some(self.brain_backend.clone()),
             "openai_url"                => Some(self.openai_url.clone()),
             "openai_model"              => Some(self.openai_model.clone()),
+            "ollama_model"              => Some(self.ollama_model.clone()),
             "ai_models"                 => Some(self.ai_models.clone()),
             "tterminal_url"             => Some(self.tterminal_url.clone()),
             "tterminal_enabled"         => Some(self.tterminal_enabled.to_string()),
             "invest_token"              => Some(self.invest_token.clone()),
+            "tterminal_exec_enabled"    => Some(self.tterminal_exec_enabled.to_string()),
+            "tterminal_exec_max_lots"   => Some(self.tterminal_exec_max_lots.to_string()),
+            "tterminal_exec_max_rub"    => Some(self.tterminal_exec_max_rub.to_string()),
             "wake_word_enabled"         => Some(self.wake_word_enabled.to_string()),
             "activation_hotkey"         => Some(self.activation_hotkey.clone()),
+            "mic_muted"                 => Some(self.mic_muted.to_string()),
+            "dnd"                       => Some(self.dnd.to_string()),
             "wake_word"                 => Some(self.wake_word.clone()),
             "active_mode"               => Some(self.active_mode.clone()),
             "modes"                     => Some(self.modes.clone()),
@@ -209,6 +238,9 @@ impl Settings {
             "openai_model" => {
                 self.openai_model = val.to_string();
             }
+            "ollama_model" => {
+                self.ollama_model = val.trim().to_string();
+            }
             "ai_models" => {
                 self.ai_models = val.to_string();
             }
@@ -221,11 +253,28 @@ impl Settings {
             "invest_token" => {
                 self.invest_token = val.to_string();
             }
+            "tterminal_exec_enabled" => {
+                self.tterminal_exec_enabled = parse_bool(val)?;
+            }
+            "tterminal_exec_max_lots" => {
+                self.tterminal_exec_max_lots = val.trim().parse::<u32>()
+                    .map_err(|_| format!("invalid integer: '{}'", val))?;
+            }
+            "tterminal_exec_max_rub" => {
+                self.tterminal_exec_max_rub = val.trim().replace(' ', "").parse::<u64>()
+                    .map_err(|_| format!("invalid integer: '{}'", val))?;
+            }
             "wake_word_enabled" => {
                 self.wake_word_enabled = parse_bool(val)?;
             }
             "activation_hotkey" => {
                 self.activation_hotkey = val.trim().to_string();
+            }
+            "mic_muted" => {
+                self.mic_muted = parse_bool(val)?;
+            }
+            "dnd" => {
+                self.dnd = parse_bool(val)?;
             }
             "wake_word" => {
                 self.wake_word = val.trim().to_lowercase();
@@ -268,12 +317,18 @@ impl Settings {
             "brain_backend",
             "openai_url",
             "openai_model",
+            "ollama_model",
             "ai_models",
             "tterminal_url",
             "tterminal_enabled",
             "invest_token",
+            "tterminal_exec_enabled",
+            "tterminal_exec_max_lots",
+            "tterminal_exec_max_rub",
             "wake_word_enabled",
             "activation_hotkey",
+            "mic_muted",
+            "dnd",
             "wake_word",
             "active_mode",
             "modes",
@@ -313,14 +368,20 @@ impl Default for Settings {
             brain_backend: default_brain_backend(),
             openai_url: String::new(),
             openai_model: String::new(),
+            ollama_model: default_ollama_model(),
             ai_models: default_ai_models(),
 
             tterminal_url: default_tterminal_url(),
             tterminal_enabled: false,
             invest_token: String::new(),
+            tterminal_exec_enabled: false,
+            tterminal_exec_max_lots: default_exec_max_lots(),
+            tterminal_exec_max_rub: default_exec_max_rub(),
 
             wake_word_enabled: true,
             activation_hotkey: default_activation_hotkey(),
+            mic_muted: false,
+            dnd: false,
 
             wake_word: default_wake_word(),
             active_mode: String::new(),

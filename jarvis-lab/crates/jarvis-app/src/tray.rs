@@ -154,7 +154,14 @@ fn handle_menu_event(event: &MenuEvent, settings: &SettingsManager, tray_state: 
             info!("Tray: активация «Слушать сейчас»");
             crate::ACTIVATE.store(true, std::sync::atomic::Ordering::SeqCst);
         }
-        "exit" => std::process::exit(0),
+        "exit" => {
+            // «Выход» = полная остановка: иначе watchdog через ~20 с поднимет Nox обратно.
+            info!("Tray: full stop requested");
+            if let Err(e) = jarvis_core::shutdown::spawn_full_stop() {
+                error!("Full stop failed to start: {}", e);
+            }
+            std::process::exit(0)
+        }
         "restart" => {
             info!("Restarting from tray menu...");
             restart_app();

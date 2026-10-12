@@ -1,188 +1,182 @@
 <script lang="ts">
+    // «Мозг» — ОДИН выбор на всё (ответы, роутер задач, наблюдатели, сценарии). Ровно два варианта:
+    // облако по API-ключу (APIMIRA и т.п., модель — из каталога) или Ollama на этом ПК (бесплатно).
+    // Подписка Claude убрана. Применяется сразу, без перезапуска.
     import { onMount } from "svelte"
     import { invoke } from "@tauri-apps/api/core"
-    import HDivider from "@/components/elements/HDivider.svelte"
     import InfoDot from "@/components/elements/InfoDot.svelte"
+    import { reloadSettings } from "@/stores"
 
-    // active backend
-    let backend = "claude"
-    // openai-compatible connection (used by the "openai" backend: ChatGPT or local)
-    let url = ""
-    let model = ""
-    let key = ""
+    type Preset = { name: string, url: string, model: string, key?: string, desc?: string }
 
-    type Preset = { name: string, url: string, model: string, key?: string }
+    const CLOUD_URL_DEFAULT = "https://apimira.com/v1"
+    const OLLAMA_DEFAULT = "qwen2.5:3b"
+
+    let backend = "openai"              // "openai" = облако, "ollama" = локально
+    let cloudUrl = CLOUD_URL_DEFAULT, cloudModel = "", ollamaModel = OLLAMA_DEFAULT
+    let keySaved = "", newKey = ""
     let presets: Preset[] = []
-
-    let toast = ""
-    function flash(m: string) { toast = m; setTimeout(() => (toast = ""), 1600) }
+    let cloudCatalog: string[] = [], ollamaList: string[] = []
+    let ollamaOk = true, cloudOk = true
+    let busy = false, toast = ""
+    function flash(m: string) { toast = m; setTimeout(() => (toast = ""), 2600) }
+    const rd = async (key: string) => (await invoke<string>("db_read", { key })) || ""
+    const wr = (key: string, val: string) => invoke("db_write", { key, val })
 
     async function load() {
         try {
-            backend = (await invoke<string>("db_read", { key: "brain_backend" })) || "claude"
-            url = await invoke<string>("db_read", { key: "openai_url" })
-            model = await invoke<string>("db_read", { key: "openai_model" })
-            key = await invoke<string>("db_read", { key: "api_key__openai" })
-            const raw = await invoke<string>("db_read", { key: "ai_models" })
+            const b = (await rd("brain_backend")).toLowerCase()
+            const url = await rd("openai_url")
+            const model = await rd("openai_model")
+            ollamaModel = (await rd("ollama_model")) || OLLAMA_DEFAULT
+            keySaved = await rd("api_key__openai")
+            const raw = await rd("ai_models")
             presets = raw ? JSON.parse(raw) : []
+            if (url.includes("11434")) {
+                // старый «локальный» выбор хранился как openai + адрес Ollama -> переносим в новые поля
+                backend = "ollama"; ollamaModel = model || ollamaModel
+                cloudUrl = CLOUD_URL_DEFAULT; cloudModel = (presets[0] && presets[0].model) || ""
+            } else {
+                backend = b === "ollama" ? "ollama" : "openai"   // старые claude/auto -> облако
+                cloudUrl = url || CLOUD_URL_DEFAULT; cloudModel = model
+            }
         } catch (e) { console.error(e) }
+        try {
+            const r = JSON.parse(await invoke<string>("brain_models"))
+            ollamaList = r.ollama || []; cloudCatalog = r.cloud || []
+            ollamaOk = !!r.ollama_ok; cloudOk = !!r.cloud_ok
+        } catch (e) { ollamaOk = false; cloudOk = false }
     }
     onMount(load)
 
-    async function setBackend(b: string) {
-        backend = b
-        await invoke("db_write", { key: "brain_backend", val: b })
-        flash("Активный мозг: " + b)
-    }
+    $: masked = keySaved ? keySaved.slice(0, 3) + "…" + keySaved.slice(-4) : ""
+    $: presetName = (presets.find((p) => p.model === cloudModel) || { name: cloudModel || "модель не выбрана" }).name
+    $: nowText = backend === "ollama" ? `Ollama (бесплатно) · ${ollamaModel}` : `Облако по ключу · ${presetName}`
+    $: catalogRest = cloudCatalog.filter((m) => !presets.some((p) => p.model === m))
 
-    async function saveConnection() {
-        await invoke("db_write", { key: "openai_url", val: url })
-        await invoke("db_write", { key: "openai_model", val: model })
-        await invoke("db_write", { key: "api_key__openai", val: key })
-        flash("Подключение сохранено")
+    async function apply(next: string) {
+        if (busy) return
+        if (next === "openai" && !keySaved && !newKey.trim()) { flash("Вставьте API-ключ облака"); return }
+        if (next === "openai" && !cloudModel) { flash("Выберите модель облака"); return }
+        busy = true
+        try {
+            if (newKey.trim()) { await wr("api_key__openai", newKey.trim()); keySaved = newKey.trim(); newKey = "" }
+            await wr("openai_url", cloudUrl.trim() || CLOUD_URL_DEFAULT)
+            if (cloudModel) await wr("openai_model", cloudModel)
+            await wr("ollama_model", ollamaModel || OLLAMA_DEFAULT)
+            await wr("brain_backend", next)
+            backend = next
+            reloadSettings()            // голосовой движок подхватит сразу
+            flash("Теперь думает: " + nowText)
+        } catch (e) { flash("Не удалось сохранить") }
+        busy = false
     }
-
-    function usePresetLocal() { url = "http://127.0.0.1:11434/v1"; model = model || "qwen2.5:7b"; key = "" }
-    function usePresetChatGPT() { url = "https://api.openai.com/v1"; model = model || "gpt-4o-mini" }
-
-    // custom presets
-    let p_name = "", p_url = "", p_model = "", p_key = ""
-    async function savePresets() {
-        await invoke("db_write", { key: "ai_models", val: JSON.stringify(presets) })
-    }
-    async function addPreset() {
-        if (!p_name.trim() || !p_url.trim()) { flash("Укажите название и URL"); return }
-        presets = [...presets, { name: p_name.trim(), url: p_url.trim(), model: p_model.trim(), key: p_key.trim() }]
-        p_name = ""; p_url = ""; p_model = ""; p_key = ""
-        await savePresets(); flash("Модель добавлена")
-    }
-    async function removePreset(i: number) {
-        presets = presets.filter((_, idx) => idx !== i)
-        await savePresets()
-    }
-    async function applyPreset(p: Preset) {
-        url = p.url; model = p.model; key = p.key || ""
-        await saveConnection()
-        await setBackend("openai")
-        flash("Применена модель: " + p.name)
-    }
+    // смена модели внутри уже выбранного варианта — применить сразу
+    function pickCloud(m: string) { cloudModel = m; if (backend === "openai") apply("openai") }
+    function pickOllama(m: string) { ollamaModel = m; if (backend === "ollama") apply("ollama") }
 </script>
 
 <div class="page">
-    <h2>ИИ-модели</h2>
-    <p class="hint">Несколько «мозгов» под разные задачи. Переключай активный или подключи свою модель.</p>
+    <h2>Мозг</h2>
+    <p class="hint">Кто думает за Нокса — один выбор на всё: ответы на вопросы, понимание задач, наблюдатели и сценарии.
+        Два варианта: облако по API-ключу или Ollama на этом компьютере. Применяется сразу.</p>
+    <div class="now">Сейчас думает: <b>{nowText}</b></div>
     {#if toast}<div class="toast">{toast}</div>{/if}
 
-    <HDivider />
+    <div class="cards">
+        <!-- ОБЛАКО -->
+        <div class="card" class:sel={backend === "openai"}>
+            <button class="head" disabled={busy} on:click={() => apply("openai")}>
+                <span class="radio" class:on={backend === "openai"}></span>
+                <span class="name">Облако по API-ключу</span>
+                <span class="tags"><span class="tag">умнее</span><span class="tag">нужен интернет</span></span>
+            </button>
+            <div class="desc">Модели через ваш ключ APIMIRA (или другой OpenAI-совместимый сервис). Если облако не ответит —
+                Нокс подстрахуется локальной Ollama.</div>
 
-    <h3>Активный мозг<InfoDot text="Какой мозг отвечает на разговорные вопросы и команды ассистента. Claude — умнее, нужен вход+VPN. OpenAI-совместимая — ChatGPT по ключу ИЛИ локальная Ollama (бесплатно, офлайн). Авто — сначала дешёвая/локальная, при сбое Claude. (Это мозг ассистента; мозг сценариев настраивается отдельно во вкладке «Сценарии».)" /></h3>
-    <div class="backends">
-        <button class="be" class:sel={backend==='claude'} on:click={() => setBackend('claude')}>
-            <div class="be-name">Claude</div>
-            <div class="be-sub">Подписка · нужен VPN + вход</div>
-        </button>
-        <button class="be" class:sel={backend==='openai'} on:click={() => setBackend('openai')}>
-            <div class="be-name">OpenAI-совместимая</div>
-            <div class="be-sub">ChatGPT (ключ) или локальная (Ollama)</div>
-        </button>
-        <button class="be" class:sel={backend==='auto'} on:click={() => setBackend('auto')}>
-            <div class="be-name">Авто</div>
-            <div class="be-sub">Сначала локальная/дешёвая → Claude</div>
-        </button>
-    </div>
-
-    <HDivider />
-
-    <h3>Подключение OpenAI-совместимой модели</h3>
-    <p class="hint">Используется, когда активен мозг «OpenAI-совместимая» или «Авто».</p>
-    <div class="presets-quick">
-        <button class="btn" on:click={usePresetLocal}>⚡ Локальная (Ollama)</button>
-        <button class="btn" on:click={usePresetChatGPT}>☁ ChatGPT</button>
-    </div>
-    <label>Базовый URL<InfoDot text="Адрес API модели. Локальная Ollama: http://127.0.0.1:11434/v1 (бесплатно, офлайн). ChatGPT: https://api.openai.com/v1 (нужен ключ). Кнопки-пресеты выше подставляют нужный адрес." />
-        <input bind:value={url} placeholder="http://127.0.0.1:11434/v1  или  https://api.openai.com/v1" />
-    </label>
-    <label>Модель<InfoDot text="Имя модели. Для Ollama — напр. qwen2.5:3b (быстрее) или qwen2.5:7b (умнее). Для ChatGPT — напр. gpt-4o-mini. Должна быть скачана/доступна у провайдера." />
-        <input bind:value={model} placeholder="qwen2.5:7b  /  gpt-4o-mini" />
-    </label>
-    <label>API-ключ (для ChatGPT; для локальной — пусто)<InfoDot text="Ключ доступа к облачной модели (ChatGPT: sk-...). Для локальной Ollama ключ не нужен — оставь пусто. Хранится локально." />
-        <input type="password" bind:value={key} placeholder="sk-..." />
-    </label>
-    <button class="btn primary" on:click={saveConnection}>Сохранить подключение</button>
-
-    <HDivider />
-
-    <h3>Мои модели</h3>
-    <p class="hint">Сохрани свои конфигурации и переключайся одной кнопкой.</p>
-
-    <div class="list">
-        {#each presets as p, i}
-            <div class="card">
-                <div>
-                    <div class="cmd-id">{p.name}</div>
-                    <div class="card-desc">{p.url} · {p.model || "—"}{p.key ? " · 🔑" : ""}</div>
+            <label>Модель
+                <div class="chips">
+                    {#each presets as p}
+                        <button class="chip" class:on={cloudModel === p.model} title={p.desc || p.model}
+                            on:click={() => pickCloud(p.model)}>{p.name}</button>
+                    {/each}
                 </div>
-                <div class="card-actions">
-                    <button class="btn small primary" on:click={() => applyPreset(p)}>Применить</button>
-                    <button class="btn small danger" on:click={() => removePreset(i)}>🗑</button>
-                </div>
-            </div>
-        {/each}
-        {#if presets.length === 0}<p class="hint">Пока нет сохранённых моделей.</p>{/if}
-    </div>
+                <select value={cloudModel} on:change={(e) => pickCloud(e.currentTarget.value)}>
+                    {#if !cloudModel}<option value="">— выберите модель —</option>{/if}
+                    {#each presets as p}<option value={p.model}>{p.name} · {p.model}</option>{/each}
+                    {#if catalogRest.length}
+                        <optgroup label="Весь каталог">
+                            {#each catalogRest as m}<option value={m}>{m}</option>{/each}
+                        </optgroup>
+                    {/if}
+                </select>
+            </label>
+            {#if !cloudOk && keySaved}<div class="warn">Каталог облака не загрузился (нет сети или ключ не подошёл) — доступен быстрый выбор выше.</div>{/if}
 
-    <div class="add-form">
-        <div class="add-grid">
-            <input bind:value={p_name} placeholder="Название (My GPT)" />
-            <input bind:value={p_url} placeholder="Базовый URL" />
-            <input bind:value={p_model} placeholder="Модель" />
-            <input type="password" bind:value={p_key} placeholder="Ключ (опц.)" />
+            <label>API-ключ<InfoDot text="Ключ облака (для APIMIRA начинается с am-). Хранится только на этом ПК." />
+                <input type="password" bind:value={newKey} placeholder={masked ? `сохранён: ${masked} — вставьте новый, чтобы заменить` : "вставьте ключ am-…"} />
+            </label>
+            <details class="adv">
+                <summary>Адрес сервиса · для опытных</summary>
+                <input bind:value={cloudUrl} placeholder={CLOUD_URL_DEFAULT} />
+            </details>
+            {#if backend === "openai" && newKey.trim()}
+                <button class="btn" disabled={busy} on:click={() => apply("openai")}>Сохранить ключ</button>
+            {/if}
         </div>
-        <button class="btn primary" on:click={addPreset}>+ Добавить модель</button>
+
+        <!-- OLLAMA -->
+        <div class="card" class:sel={backend === "ollama"}>
+            <button class="head" disabled={busy} on:click={() => apply("ollama")}>
+                <span class="radio" class:on={backend === "ollama"}></span>
+                <span class="name">Ollama — бесплатно</span>
+                <span class="tags"><span class="tag">офлайн</span><span class="tag">бесплатно</span></span>
+            </button>
+            <div class="desc">Работает на этом компьютере, без интернета и без ключа. Быстрый, но заметно проще облака:
+                годится для простых команд и разбора новостей.</div>
+            <label>Модель<InfoDot text="Модели, установленные в Ollama. 3b — быстрее, 7b — умнее, но медленнее." />
+                <select value={ollamaModel} on:change={(e) => pickOllama(e.currentTarget.value)}>
+                    {#if !ollamaList.includes(ollamaModel)}<option value={ollamaModel}>{ollamaModel}</option>{/if}
+                    {#each ollamaList as m}<option value={m}>{m}</option>{/each}
+                </select>
+            </label>
+            {#if !ollamaOk}<div class="warn">Ollama не запущена — Нокс поднимет её сам при старте; список моделей появится после этого.</div>{/if}
+        </div>
     </div>
 </div>
 
 <style>
     .page { padding: 0 0.9rem 2rem; color: #dfeff0; }
     h2 { margin: 0 0 0.2rem; font-size: 1.25rem; color: #eafeff; }
-    h3 { margin: 0.6rem 0 0.4rem; font-size: 1rem; color: #cdeff0; }
     .hint { color: rgba(223,239,240,0.55); font-size: 0.8rem; margin: 0.15rem 0 0.6rem; }
+    .now { font-size: 0.85rem; color: rgba(223,239,240,0.75); margin-bottom: 0.7rem; }
+    .now b { color: #2fe6e6; }
     .toast { background: rgba(47,230,230,0.14); border: 1px solid #2fe6e6; color: #eafeff;
-        padding: 0.4rem 0.7rem; border-radius: 8px; font-size: 0.8rem; margin-bottom: 0.5rem; }
+        padding: 0.4rem 0.7rem; border-radius: 8px; font-size: 0.8rem; margin-bottom: 0.6rem; }
 
-    .backends { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.6rem; }
-    .be { text-align: left; background: rgba(15,26,30,0.6); border: 1px solid rgba(82,254,254,0.14);
-        border-radius: 10px; padding: 0.7rem 0.85rem; cursor: pointer; color: #dfeff0; transition: all 0.15s ease; }
-    .be:hover { background: rgba(82,254,254,0.08); }
-    .be.sel { border-color: #2fe6e6; background: rgba(47,230,230,0.14); box-shadow: 0 0 0 1px #2fe6e6 inset; }
-    .be-name { font-weight: 600; color: #eafeff; font-size: 0.9rem; }
-    .be-sub { font-size: 0.74rem; color: rgba(223,239,240,0.6); margin-top: 0.2rem; }
-
-    .presets-quick { display: flex; gap: 0.5rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
-    label { display: block; font-size: 0.78rem; color: rgba(223,239,240,0.75); margin-bottom: 0.6rem; }
-    input {
-        width: 100%; margin-top: 0.28rem; padding: 0.5rem 0.6rem;
-        background: rgba(8,16,19,0.85); border: 1px solid rgba(82,254,254,0.2);
-        border-radius: 7px; color: #eafeff; font-size: 0.85rem; box-sizing: border-box;
-    }
-    input:focus { outline: none; border-color: #2fe6e6; }
-
-    .btn { padding: 0.5rem 0.9rem; background: rgba(35,50,55,0.7);
-        border: 1px solid rgba(82,254,254,0.2); border-radius: 8px; color: #cdeff0;
-        font-size: 0.82rem; cursor: pointer; transition: all 0.15s ease; }
-    .btn:hover { background: rgba(82,254,254,0.12); }
-    .btn.primary { background: rgba(47,230,230,0.18); border-color: #2fe6e6; color: #eafeff; }
-    .btn.small { padding: 0.35rem 0.6rem; }
-    .btn.danger { color: #ffb4b4; border-color: rgba(255,80,80,0.35); }
-
-    .list { display: flex; flex-direction: column; gap: 0.5rem; margin: 0.4rem 0 0.8rem; }
-    .card { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem;
-        background: rgba(15,26,30,0.6); border: 1px solid rgba(82,254,254,0.12); border-radius: 10px; padding: 0.65rem 0.9rem; }
-    .cmd-id { font-weight: 600; color: #eafeff; font-size: 0.9rem; }
-    .card-desc { font-size: 0.76rem; color: rgba(223,239,240,0.6); margin-top: 0.2rem; word-break: break-all; }
-    .card-actions { display: flex; gap: 0.35rem; flex-shrink: 0; }
-
-    .add-form { background: rgba(15,26,30,0.5); border: 1px dashed rgba(82,254,254,0.2); border-radius: 10px; padding: 0.8rem; }
-    .add-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.5rem; margin-bottom: 0.6rem; }
-    .add-grid input { margin-top: 0; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0.7rem; }
+    .card { background: rgba(15,26,30,0.6); border: 1px solid rgba(82,254,254,0.14); border-radius: 12px;
+        padding: 0.8rem 0.95rem; display: flex; flex-direction: column; gap: 0.5rem; }
+    .card.sel { border-color: #2fe6e6; background: rgba(47,230,230,0.1); box-shadow: 0 0 0 1px #2fe6e6 inset; }
+    .head { display: flex; align-items: center; gap: 0.5rem; background: none; border: none; padding: 0;
+        color: inherit; cursor: pointer; text-align: left; font: inherit; flex-wrap: wrap; }
+    .head:disabled { cursor: default; }
+    .radio { width: 15px; height: 15px; border-radius: 50%; border: 2px solid rgba(223,239,240,0.4); flex: none; }
+    .radio.on { border-color: #2fe6e6; background: #2fe6e6; box-shadow: 0 0 8px #2fe6e6; }
+    .name { font-weight: 700; color: #eafeff; font-size: 0.95rem; }
+    .tags { display: flex; gap: 0.3rem; margin-left: auto; }
+    .tag { font-size: 0.66rem; color: #94a3b8; border: 1px solid rgba(148,163,184,0.3); border-radius: 999px; padding: 0.05rem 0.45rem; }
+    .desc { font-size: 0.76rem; color: rgba(223,239,240,0.62); line-height: 1.4; }
+    label { display: block; font-size: 0.78rem; color: rgba(223,239,240,0.75); }
+    .chips { display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0.3rem 0; }
+    .chip { font-size: 0.74rem; padding: 0.25rem 0.55rem; border-radius: 999px; cursor: pointer;
+        background: rgba(35,50,55,0.7); border: 1px solid rgba(82,254,254,0.2); color: #cdeff0; }
+    .chip.on { background: rgba(47,230,230,0.22); border-color: #2fe6e6; color: #eafeff; }
+    input, select { width: 100%; margin-top: 0.28rem; padding: 0.45rem 0.55rem; background: rgba(8,16,19,0.85);
+        border: 1px solid rgba(82,254,254,0.2); border-radius: 7px; color: #eafeff; font-size: 0.82rem; box-sizing: border-box; }
+    input:focus, select:focus { outline: none; border-color: #2fe6e6; }
+    .warn { font-size: 0.74rem; color: #fde68a; }
+    .adv summary { cursor: pointer; font-size: 0.75rem; color: rgba(223,239,240,0.6); }
+    .btn { align-self: flex-start; padding: 0.4rem 0.8rem; background: rgba(47,230,230,0.18); border: 1px solid #2fe6e6;
+        border-radius: 8px; color: #eafeff; font-size: 0.8rem; cursor: pointer; }
 </style>

@@ -52,3 +52,27 @@ jarvis-lab/target/release/resources/models/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Telegram: сессия = полный доступ к аккаунту, конфиг содержит api_hash
+**/tg_session.session*
+**/*.session
+**/*.session-journal
+**/tg_config.json
+
+# Личные данные и рабочие журналы — НЕ публиковать (репозиторий публичный)
+jarvis-voice/*.jsonl
+jarvis-voice/nox_watchers.json
+jarvis-voice/nox_notes.json
+jarvis-voice/nox_calendar.json
+jarvis-voice/nox_agenda*.json
+jarvis-voice/cscalp_layout.json
+jarvis-voice/cscalp_keys.json
+jarvis-voice/astra_chats/
+jarvis-voice/_gmail_url.txt
+jarvis-voice/sys_monitor.json
+jarvis-voice/tts_engine.txt
+jarvis-voice/tts_silero_speaker.txt
+jarvis-voice/xtts_ready.flag
+# Бэкапы правок
+**/*.bak
+**/*.bak_*

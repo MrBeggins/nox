@@ -20,6 +20,7 @@ click==8.5.0
 cloudpickle==3.1.2
 cloudscraper==1.2.71
 colorama==0.4.6
+comtypes==1.4.17
 contourpy==1.3.3
 cryptography==50.0.1
 cycler==0.12.1
@@ -110,6 +111,8 @@ pydantic_core==2.46.5
 pydub==0.25.1
 pyee==13.0.1
 Pygments==2.21.0
+pymorphy3==2.0.6
+pymorphy3-dicts-ru==2.4.417150.4580142
 pyparsing==3.3.2
 pypinyin==0.55.0
 python-crfsuite==0.9.12
@@ -154,8 +157,8 @@ transformers==5.17.0
 transformers-stream-generator==0.0.5
 truststore==0.10.4
 typer==0.27.2
-typing-inspection==0.4.4
 typing_extensions==4.16.0
+typing-inspection==0.4.4
 tzdata==2026.4
 Unidecode==1.4.0
 urllib3==2.7.0

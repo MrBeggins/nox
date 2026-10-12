@@ -23,7 +23,7 @@ MODEL_CKPT = r"C:\jarvis-voice\models\ru\F5TTS_v1_Base_v2\model_last_inference.s
 VOCAB      = r"C:\jarvis-voice\models\ru\F5TTS_v1_Base\vocab.txt"
 REF_AUDIO  = r"C:\jarvis-voice\ref_jarvis_og.wav"
 SPEED      = 1.2
-NFE        = 14
+NFE        = 24   # было 14: больше шагов синтеза -> стабильнее, меньше «белиберды» (чуть медленнее)
 SEED       = 42
 
 print("[init] RUAccent...")
@@ -119,7 +119,7 @@ def _normalize_numbers(text: str) -> str:
     return _re.sub(r"\d+(?:[.,]\d+)?", _num_repl, text)
 
 # --- Разбивка длинного текста на короткие куски (F5 «плывёт» на длинном/быстром) ---
-def _split_for_tts(text: str, max_len: int = 130):
+def _split_for_tts(text: str, max_len: int = 100):   # было 130: короче куски -> F5 реже «срывается»
     text = _re.sub(r"\s+", " ", (text or "").strip())
     if not text:
         return []

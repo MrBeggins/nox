@@ -2,10 +2,33 @@
     import { onMount, onDestroy } from "svelte"
     import { invoke } from "@tauri-apps/api/core"
     import {
-        isJarvisRunning, updateJarvisStats, enableIpc, disableIpc,
+        isJarvisRunning, updateJarvisStats,
         translate, translations, lastAssistantReply, setMuted,
-        recentReplies, sendTextCommand, setDnd, jarvisState
+        recentReplies, sendTextCommand, setDnd, jarvisState, abortSpeech, ipcConnected
     } from "@/stores"
+
+    // запрос текстом: то же, что сказать голосом (роутер, команды, мозг); ответ — в ленту и вслух
+    let ask = ""
+    let askNote = ""
+    function sendAsk() {
+        const q = ask.trim()
+        if (!q) return
+        if (!$ipcConnected) {
+            askNote = "Нокс не запущен — запустите ассистента"
+            setTimeout(() => (askNote = ""), 3000)
+            return
+        }
+        const ok = sendTextCommand(q)
+        if (ok === false) { askNote = "Не удалось отправить — попробуйте ещё раз"; setTimeout(() => (askNote = ""), 3000); return }
+        const now = new Date()
+        const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`
+        recentReplies.update((list) => [{ time, text: "Вы: " + q }, ...list].slice(0, 12))
+        ask = ""
+    }
+
+    function stopSpeaking() {
+        try { abortSpeech() } catch (e) { console.error(e) }
+    }
 
     // краткая подпись состояния под орбом
     $: stateCaption =
@@ -19,12 +42,18 @@
     let overlayOn = false
     let processRunning = false
     let launching = false
-    let wasRunning = false
 
     $: t = (key: string) => translate($translations, key)
 
-    function toggleMic() {
+    // Тумблеры Пульса: сохраняем в настройки (переживает перезапуск) И шлём движку вживую.
+    // Раньше слали только по IPC: если связь в этот момент не установлена — нажатие терялось.
+    async function persist(key: string, on: boolean) {
+        try { await invoke("db_write", { key, val: on ? "true" : "false" }) } catch (e) { console.error(e) }
+    }
+
+    async function toggleMic() {
         micMuted = !micMuted
+        await persist("mic_muted", micMuted)
         try { setMuted(micMuted) } catch (e) { console.error(e) }
     }
 
@@ -33,8 +62,9 @@
         try { sendTextCommand(news ? "включи новости" : "выключи новости") } catch (e) { console.error(e) }
     }
 
-    function toggleDnd() {
+    async function toggleDnd() {
         dnd = !dnd
+        await persist("dnd", dnd)
         try { setDnd(dnd) } catch (e) { console.error(e) }
     }
 
@@ -46,17 +76,18 @@
         } catch (e) { console.error(e) }
     }
 
-    isJarvisRunning.subscribe((value) => {
-        processRunning = value
-        if (value) { enableIpc(); wasRunning = true }
-        else if (wasRunning) { disableIpc(); wasRunning = false }
-    })
+    // IPC держит App.svelte на всё приложение; тут только показываем, запущен ли движок.
+    // Подписку снимаем при уходе со страницы (раньше копилась при каждом заходе).
+    const unsubRunning = isJarvisRunning.subscribe((value) => { processRunning = value })
 
     onMount(async () => {
         updateJarvisStats()
         try { const ov = await invoke<string>("db_read", { key: "overlay_enabled" }); overlayOn = ov === "true" } catch (e) {}
+        // реальное сохранённое состояние, а не «всегда включено» при каждом открытии
+        try { micMuted = (await invoke<string>("db_read", { key: "mic_muted" })) === "true" } catch (e) {}
+        try { dnd = (await invoke<string>("db_read", { key: "dnd" })) === "true" } catch (e) {}
     })
-    onDestroy(() => disableIpc())
+    onDestroy(() => unsubRunning())
 
     async function runAssistant() {
         launching = true
@@ -87,6 +118,7 @@
                 {:else}
                     скажите «Нокс» или нажмите хоткей
                 {/if}
+                <button class="stopbtn" on:click={stopSpeaking} title="Прервать ответ/команду">⏹ Стоп</button>
             {:else}
                 <b>Ассистент не запущен</b>
                 <button class="start" on:click={runAssistant} disabled={launching}>
@@ -97,6 +129,11 @@
     </div>
 
     <aside class="aside">
+        <form class="askbox" on:submit|preventDefault={sendAsk}>
+            <input bind:value={ask} placeholder="Написать Ноксу… (Enter — отправить)" maxlength="2000" autocomplete="off" />
+            <button type="submit" disabled={!ask.trim()} title="Отправить">➤</button>
+        </form>
+        {#if askNote}<div class="asknote">{askNote}</div>{/if}
         <h4>Последнее в эфире</h4>
         <div class="feedscroll">
             {#if $recentReplies.length}
@@ -172,8 +209,19 @@
     .orbcap b.accent { color: $accent; text-shadow: 0 0 18px rgba(53,224,208,.7); font-size: 17px; }
     .start { margin-top: 4px; padding: 7px 16px; border-radius: 999px; border: 1px solid $accent; background: rgba(53,224,208,.14);
         color: $accent; font-weight: 700; cursor: pointer; }
+    .stopbtn { display: inline-block; margin-top: 10px; padding: 6px 16px; border-radius: 999px;
+        border: 1px solid #ff6b6b; background: rgba(255,80,80,.12); color: #ff9a9a; font-weight: 700; cursor: pointer; }
+    .stopbtn:hover { background: rgba(255,80,80,.22); }
 
     .aside { border-left: 1px solid $line; padding: 18px; display: flex; flex-direction: column; gap: 12px; height: 100%; min-height: 0; }
+    .askbox { display: flex; gap: 8px; flex: none; }
+    .askbox input { flex: 1; min-width: 0; padding: 10px 12px; background: rgba(8,16,19,.85); border: 1px solid $line;
+        border-radius: 10px; color: $ink; font-size: 13.5px; outline: none; }
+    .askbox input:focus { border-color: $accent; }
+    .askbox button { flex: none; width: 42px; border-radius: 10px; border: 1px solid $accent; background: rgba(53,224,208,.16);
+        color: $accent; font-size: 16px; cursor: pointer; }
+    .askbox button:disabled { opacity: .4; cursor: default; }
+    .asknote { font-size: 12px; color: #fde68a; flex: none; }
     h4 { font-size: 11px; letter-spacing: 1.6px; text-transform: uppercase; color: $muted; font-weight: 700; margin: 0; font-family: "JetBrains Mono", monospace; flex: none; }
     /* Только лента скроллится — орб и кнопки остаются на месте */
     .feedscroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;

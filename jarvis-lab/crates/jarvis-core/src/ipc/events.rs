@@ -13,7 +13,7 @@ pub enum IpcEvent {
     // Speech recognized
     SpeechRecognized { text: String },
 
-    // Conversational reply from the Claude "brain" (emitted when no local command matched)
+    // Разговорный ответ мозга (когда ни одна локальная команда не подошла)
     AssistantReply { text: String },
 
     // Command was executed
@@ -50,6 +50,9 @@ pub enum IpcAction {
 
     // Reload settings (app.db) into memory — apply mode/brain changes без перезапуска
     ReloadSettings,
+
+    // Принудительно прервать текущую озвучку (кнопка «Стоп» на пульсе)
+    AbortSpeech,
 
     // Ping to check connection
     Ping,

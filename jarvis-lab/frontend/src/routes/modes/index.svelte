@@ -7,7 +7,8 @@
 
     function applyLive() { try { reloadSettings() } catch (e) { console.error(e) } }
 
-    type Mode = { id: string, name: string, wake_word: string, brain: string, model: string }
+    // мозг в режимах НЕ хранится: он один на всё — страница «Мозг» (облако по ключу или Ollama)
+    type Mode = { id: string, name: string, wake_word: string }
     let modes: Mode[] = []
     let activeId = ""
     let toast = ""
@@ -16,14 +17,13 @@
     // редактор
     let editing: Mode | null = null
     let isNew = false
-    let f_name = "", f_wake = "джарвис", f_brain = "openai", f_model = "qwen2.5:7b"
+    let f_name = "", f_wake = "джарвис"
 
     // тумблеры
     type Tgl = { key: string, title: string, desc: string, value: boolean }
     let toggles: Tgl[] = [
         { key: "brain_enabled",  title: "🧠 Мозг", desc: "Разговорные ответы ИИ.", value: true },
         { key: "tts_enabled",    title: "🔊 Голос", desc: "Озвучка ответов.", value: true },
-        { key: "vision_enabled", title: "👁 Зрение", desc: "Анализ экрана (тратит токены).", value: false },
     ]
     let loaded = false
 
@@ -35,9 +35,7 @@
             if (modes.length === 0) {
                 // создать профиль по умолчанию из текущих настроек
                 const wake = (await invoke<string>("db_read", { key: "wake_word" })) || "джарвис"
-                const brain = (await invoke<string>("db_read", { key: "brain_backend" })) || "openai"
-                const model = (await invoke<string>("db_read", { key: "openai_model" })) || "qwen2.5:7b"
-                modes = [{ id: "main", name: "Основной", wake_word: wake, brain, model }]
+                modes = [{ id: "main", name: "Основной", wake_word: wake }]
                 activeId = "main"
                 await persist()
                 await invoke("db_write", { key: "active_mode", val: "main" })
@@ -57,11 +55,11 @@
 
     function startNew() {
         isNew = true; editing = null
-        f_name = ""; f_wake = "джарвис"; f_brain = "openai"; f_model = "qwen2.5:7b"
+        f_name = ""; f_wake = "джарвис"
     }
     function startEdit(m: Mode) {
         isNew = false; editing = m
-        f_name = m.name; f_wake = m.wake_word; f_brain = m.brain; f_model = m.model
+        f_name = m.name; f_wake = m.wake_word
     }
     function cancel() { editing = null; isNew = false }
 
@@ -69,10 +67,9 @@
         if (!f_name.trim()) { flash("Укажите название режима"); return }
         if (isNew) {
             const id = "m" + Date.now()
-            modes = [...modes, { id, name: f_name.trim(), wake_word: (f_wake.trim() || "джарвис").toLowerCase(), brain: f_brain, model: f_model.trim() }]
+            modes = [...modes, { id, name: f_name.trim(), wake_word: (f_wake.trim() || "джарвис").toLowerCase() }]
         } else if (editing) {
             editing.name = f_name.trim(); editing.wake_word = (f_wake.trim() || "джарвис").toLowerCase()
-            editing.brain = f_brain; editing.model = f_model.trim()
             modes = modes
         }
         await persist()
@@ -91,10 +88,8 @@
         activeId = m.id
         await invoke("db_write", { key: "active_mode", val: m.id })
         await invoke("db_write", { key: "wake_word", val: m.wake_word })
-        await invoke("db_write", { key: "brain_backend", val: m.brain })
-        if (m.model) await invoke("db_write", { key: "openai_model", val: m.model })
-        applyLive()  // мозг/режим/команды применяются сразу; имя — после перезапуска
-        flash(`Активен режим «${m.name}». Мозг и команды — сразу; имя-обращение — после перезапуска ассистента.`)
+        applyLive()  // режим/команды применяются сразу; имя — после перезапуска
+        flash(`Активен режим «${m.name}». Команды — сразу; имя-обращение — после перезапуска ассистента.`)
     }
 
     async function toggle(t: Tgl) {
@@ -106,7 +101,7 @@
 
 <div class="page">
     <h2>Режимы</h2>
-    <p class="hint">Профили ассистента: у каждого своё имя-обращение, свой мозг и свой набор команд (команды привязываются на вкладке «Команды»).</p>
+    <p class="hint">Профили ассистента: у каждого своё имя-обращение и свой набор команд (команды привязываются на вкладке «Команды»). Мозг выбирается один на всё — на странице «Мозг».</p>
     {#if toast}<div class="toast">{toast}</div>{/if}
 
     <div class="actions"><button class="btn primary" on:click={startNew}>+ Новый режим</button></div>
@@ -120,18 +115,6 @@
             <label>Имя-обращение (wake word)<InfoDot text="Слово активации для ЭТОГО режима. Напр. в «Трейдинге» — «джарвис», дома — «кит». Смена применяется после перезапуска ассистента." />
                 <input bind:value={f_wake} placeholder="джарвис / кит / петя" />
             </label>
-            <div class="grid2">
-                <label>Мозг<InfoDot text="Какой мозг использует этот режим: локальная/OpenAI-совместимая, Claude или Авто. Позволяет в разных режимах разный мозг." />
-                    <select bind:value={f_brain}>
-                        <option value="openai">Локальная / OpenAI-совместимая</option>
-                        <option value="claude">Claude</option>
-                        <option value="auto">Авто</option>
-                    </select>
-                </label>
-                <label>Модель (для локальной/OpenAI)<InfoDot text="Имя модели для этого режима (напр. qwen2.5:3b — быстрее, 7b — умнее). Для Claude не используется." />
-                    <input bind:value={f_model} placeholder="qwen2.5:7b / gpt-4o-mini" />
-                </label>
-            </div>
             <div class="actions">
                 <button class="btn primary" on:click={saveMode}>Сохранить</button>
                 <button class="btn" on:click={cancel}>Отмена</button>
@@ -147,7 +130,7 @@
                         <span class="nm">{m.name}</span>
                         {#if m.id === activeId}<span class="badge">активен</span>{/if}
                     </div>
-                    <div class="sub">🗣 «{m.wake_word}» · мозг: {m.brain}{m.model ? ` (${m.model})` : ""}</div>
+                    <div class="sub">🗣 «{m.wake_word}»</div>
                 </div>
                 <div class="card-actions">
                     {#if m.id !== activeId}<button class="btn small primary" on:click={() => activate(m)}>Включить</button>{/if}
@@ -184,7 +167,6 @@
         padding: 0.4rem 0.7rem; border-radius: 8px; font-size: 0.8rem; margin-bottom: 0.5rem; }
     .actions { display: flex; gap: 0.5rem; margin: 0.4rem 0; }
     .editor { background: rgba(15,26,30,0.7); border: 1px solid rgba(82,254,254,0.18); border-radius: 12px; padding: 1rem; margin-bottom: 0.8rem; }
-    .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap: 0.6rem; }
     label { display: block; font-size: 0.78rem; color: rgba(223,239,240,0.75); margin-bottom: 0.6rem; }
     input, select { width: 100%; margin-top: 0.28rem; padding: 0.5rem 0.6rem; background: rgba(8,16,19,0.85);
         border: 1px solid rgba(82,254,254,0.2); border-radius: 7px; color: #eafeff; font-size: 0.85rem; box-sizing: border-box; }

@@ -9,6 +9,7 @@ Nox watchdog — сам следит за стеком и чинит упавш�
 import os, sys, time, socket, subprocess, base64, struct, json
 
 VENV_PY  = r"C:\jarvis-voice\.venv\Scripts\python.exe"
+XTTS_PY  = r"C:\jarvis-voice\.venv-xtts\Scripts\python.exe"   # изолированное окружение для XTTS
 VOICE_DIR = r"C:\jarvis-voice"
 LAB_DIR  = r"C:\jarvis-lab"
 OLLAMA   = os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Ollama\ollama.exe")
@@ -76,7 +77,7 @@ def ensure_yandex():
     if os.path.exists(YANDEX):
         _spawn(YANDEX, ["--user-data-dir=" + os.path.join(VOICE_DIR, "yandex_jarvis"),
                         "--remote-debugging-port=9222", "--no-first-run",
-                        "--no-default-browser-check", "https://www.tbank.ru/terminal/"], VOICE_DIR)
+                        "--no-default-browser-check"], VOICE_DIR)   # вкладку терминала откроет ридер (одну)
         return True
     return False
 
@@ -105,36 +106,46 @@ GRACE = {"tts": 70, "yandex": 25, "app": 20, "gui": 15, "ollama": 20,
 def _grace_ok(key):
     return time.time() - _last_start.get(key, 0) > GRACE.get(key, GRACE["default"])
 
-_TTS_SCRIPT = None
-def _tts_script():
-    """Выбор движка голоса: файл tts_engine.txt ('silero'/'f5'); иначе автодетект NVIDIA.
-    Результат кешируется (не дёргаем nvidia-smi каждый тик → без мельканий консоли)."""
-    global _TTS_SCRIPT
-    if _TTS_SCRIPT:
-        return _TTS_SCRIPT
+def _tts_choice():
+    """Движок голоса из tts_engine.txt ('silero'/'xtts'/'f5'); иначе автодетект NVIDIA.
+    Возвращает (интерпретатор, скрипт). XTTS — в своём окружении. Без кеша: смена движка
+    подхватывается на следующем тике (чтение файла дешёвое)."""
     try:
         eng = open(r"C:\jarvis-voice\tts_engine.txt", encoding="utf-8").read().strip().lower()
     except Exception:
         eng = ""
+    if eng == "xtts" and os.path.exists(XTTS_PY):
+        return (XTTS_PY, "tts_xtts_server.py")
     if eng == "silero":
-        _TTS_SCRIPT = "tts_silero_server.py"
-    elif eng == "f5":
-        _TTS_SCRIPT = "tts_server.py"
-    else:
-        _TTS_SCRIPT = "tts_server.py"  # по умолчанию F5
-        try:
-            import shutil
-            if not shutil.which("nvidia-smi"):
-                _TTS_SCRIPT = "tts_silero_server.py"  # нет GPU -> Silero
-        except Exception:
-            pass
-    return _TTS_SCRIPT
+        return (VENV_PY, "tts_silero_server.py")
+    if eng == "f5":
+        return (VENV_PY, "tts_server.py")
+    try:
+        import shutil
+        if not shutil.which("nvidia-smi"):
+            return (VENV_PY, "tts_silero_server.py")   # нет GPU -> Silero
+    except Exception:
+        pass
+    return (VENV_PY, "tts_server.py")                   # по умолчанию F5
 
-def _tick():
+def ensure_tts():
+    if _port_up(8123):
+        return False
+    py, script = _tts_choice()
+    _spawn(py, [script], VOICE_DIR,
+           os.path.join(VOICE_DIR, "tts_out.log"), os.path.join(VOICE_DIR, "tts_err.log"))
+    return True
+
+STOPPED_FLAG = r"C:\jarvis-voice\nox_stopped.flag"   # пользователь остановил Nox (трей «Выход» / кнопка)
+
+def _user_stopped():
+    return os.path.exists(STOPPED_FLAG)
+
+def _tick(include_gui=True):
     restarted = []
     checks = [
         ("ollama",   lambda: ensure_ollama(),                                   "Ollama"),
-        ("tts",      lambda: ensure_py(_tts_script(), 8123, "tts", 70),         "озвучка"),
+        ("tts",      lambda: ensure_tts(),                                      "озвучка"),
         ("invest",   lambda: ensure_py("invest_reader.py", 8124, "ir", 15),     "портфель"),
         ("yandex",   lambda: ensure_yandex(),                                   "окно терминала"),
         ("terminal", lambda: ensure_py("terminal_reader.py", 8126, "tr", 25),   "читатель терминала"),
@@ -148,6 +159,9 @@ def _tick():
         ("gui",      lambda: ensure_gui(),                                      "интерфейс"),
     ]
     for key, fn, label in checks:
+        # окно GUI поднимаем только при запуске: если пользователь его закрыл — не переоткрываем
+        if key == "gui" and not include_gui:
+            continue
         if not _grace_ok(key):
             continue
         try:
@@ -172,7 +186,10 @@ def main():
     time.sleep(2)
     first = True
     while True:
-        done = _tick()
+        if _user_stopped():
+            # «Выход»/«Остановить Nox»: ничего не поднимаем назад, сторож завершается
+            return
+        done = _tick(include_gui=first)
         if first:
             # ПЕРВЫЙ запуск: молча поднимаем всё, ждём движок + готовый голос (до ~2.5 мин),
             # затем ОДНА фраза вместо спама «запустил то, запустил это».

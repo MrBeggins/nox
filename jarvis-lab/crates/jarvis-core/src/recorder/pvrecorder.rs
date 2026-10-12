@@ -11,9 +11,11 @@ pub fn init_microphone(device_index: i32, frame_length: u32) -> bool {
     }
     
     // initialize
+    // Большой буфер (~10 с): пока играет звук-отклик (блокирующее воспроизведение),
+    // кадры копятся и читаются потом — начало фразы не теряется.
     let pv_recorder = PvRecorderBuilder::new(frame_length as i32)
         .device_index(device_index)
-        // .frame_length(frame_length as i32)
+        .buffered_frames_count(300)
         .init();
 
     match pv_recorder {

@@ -1,6 +1,10 @@
 # Тихий запуск Nox — без консольных окон.
 # Голосовой сервер поднимается на pythonw (без консоли), затем открывается GUI.
 
+# Пользователь запускает Nox — снимаем метку «остановлен» (её ставит трей «Выход» /
+# кнопка «Остановить Nox»; пока она есть, watchdog ничего не поднимает назад).
+Remove-Item -Path "C:\jarvis-voice\nox_stopped.flag" -Force -ErrorAction SilentlyContinue
+
 # 0) Мозг Ollama (:11434) — иначе на не-локальные фразы Nox говорит «не найдено».
 $oup = $false
 try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', 11434); $c.Close(); $oup = $true } catch {}
@@ -44,7 +48,9 @@ $yup = $false
 try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', 9222); $c.Close(); $yup = $true } catch {}
 if (-not $yup) {
     Start-Process -FilePath "C:\Program Files\Yandex\YandexBrowser\Application\browser.exe" `
-        -ArgumentList '--user-data-dir=C:\jarvis-voice\yandex_jarvis','--remote-debugging-port=9222','--no-first-run','--no-default-browser-check','https://www.tbank.ru/terminal/'
+        -ArgumentList '--user-data-dir=C:\jarvis-voice\yandex_jarvis','--remote-debugging-port=9222','--no-first-run','--no-default-browser-check'
+    # адрес терминала не передаём: браузер восстановит прошлые вкладки, а если терминала нет —
+    # terminal_reader откроет ровно одну (раньше каждый запуск давал лишнюю вкладку)
     Start-Sleep -Seconds 6
 }
 
@@ -87,9 +93,12 @@ foreach ($svc in @(@{p=8128;s="bls_reader.py";o="bls"}, @{p=8129;s="bea_reader.p
     }
 }
 
-# 3) GUI (release — собран без консоли)
-Start-Process -FilePath "C:\jarvis-lab\target\release\jarvis-gui.exe" `
-    -WorkingDirectory "C:\jarvis-lab\target\release"
+# 3) GUI (release — собран без консоли). Только если ещё не открыт: иначе плодились копии
+#    окна (у каждой своё подключение и свой шар-оверлей).
+if (-not (Get-Process jarvis-gui -ErrorAction SilentlyContinue)) {
+    Start-Process -FilePath "C:\jarvis-lab\target\release\jarvis-gui.exe" `
+        -WorkingDirectory "C:\jarvis-lab\target\release"
+}
 
 # 4) Watchdog — сам следит за стеком и перезапускает упавшее (singleton через порт 8130)
 $wup = $false

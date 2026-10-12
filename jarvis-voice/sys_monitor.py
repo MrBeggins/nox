@@ -156,6 +156,14 @@ def _open(q):
             break
     # 3) известный сайт?
     if low in SITES:
+        if "tbank.ru" in SITES[low] and "terminal" in SITES[low]:
+            try:   # терминал живёт в окне Нокса — показываем его, а не плодим вкладки
+                import urllib.request as _u, json as _j
+                r = _j.loads(_u.urlopen("http://127.0.0.1:8126/terminal_show", timeout=20).read().decode("utf-8"))
+                if r.get("ok"):
+                    return {"ok": True, "text": r.get("text", "Терминал открыт, сэр.")}
+            except Exception:
+                pass
         webbrowser.open(SITES[low]); return {"ok": True, "text": f"Открываю {low}, сэр."}
     # 4) известная программа?
     if low in APPS:

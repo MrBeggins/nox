@@ -21,7 +21,8 @@ export {
     setDnd,
     stopJarvisApp,
     reloadCommands,
-    reloadSettings
+    reloadSettings,
+    abortSpeech
 } from "./lib/ipc"
 
 // re-export i18n

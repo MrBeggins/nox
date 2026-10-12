@@ -23,7 +23,8 @@ _loop = None
 _client = None
 
 # ------------------------------------------------------------------ конфиг
-_DEF = {"api_id": 0, "api_hash": "", "chats": [], "keywords": [], "match": "any", "mon": True}
+_DEF = {"api_id": 0, "api_hash": "", "chats": [], "keywords": [], "match": "any", "mon": True,
+        "public": []}   # public — имена публичных каналов, читаемых БЕЗ входа (t.me/s/<имя>)
 def load():
     try:
         d = json.load(open(CONFIG, encoding="utf-8"))
@@ -33,6 +34,7 @@ def load():
         d.setdefault(k, v if not isinstance(v, list) else list(v) if isinstance(v, list) else v)
     d["chats"] = [int(x) for x in d.get("chats", []) if str(x).lstrip("-").isdigit()]
     d["keywords"] = [str(x) for x in d.get("keywords", []) if str(x).strip()]
+    d["public"] = [str(x).lower() for x in d.get("public", []) if str(x).strip()]
     return d
 def save(d):
     try:
@@ -86,6 +88,14 @@ def _shorten(text, n=220):
     t = " ".join((text or "").split())
     return t if len(t) <= n else t[:n] + "…"
 
+import re as _re0
+_EMOJI_RE = _re0.compile("[\U0001F000-\U0001FAFF☀-➿️‍⃣⬀-⯿]")
+def _speakable(text):
+    """Для озвучки: без эмодзи/флагов и #хэштегов (MarketTwits: «⚠️🇺🇸 #дкп #сша …»)."""
+    t = _EMOJI_RE.sub(" ", text or "")
+    t = _re0.sub(r"(?<!\w)#\w+", " ", t)
+    return " ".join(t.split())
+
 # ------------------------------------------------------------------ обработка сообщения
 def _handle_message(chat_title, text):
     cfg = load()
@@ -102,7 +112,7 @@ def _handle_message(chat_title, text):
         pass
     short = _shorten(text)
     _log(f"[{chat_title}] {short}")
-    _announce(f"Телеграм, {chat_title}: {short}")
+    _announce(f"Телеграм, {chat_title}: {_shorten(_speakable(text))}")
     # подать в движок сценариев и разбор событий (как новость)
     try:
         import nox_scenarios
@@ -111,6 +121,129 @@ def _handle_message(chat_title, text):
         nox_scenarios.extract_event(text)
     except Exception:
         pass
+
+# ------------------------------------------------------------------ публичные каналы БЕЗ входа (t.me/s/<имя>)
+# Веб-превью публичного канала отдаётся без авторизации: 20 последних постов, а
+# ?after=<id> — только новее id (пусто ≈ 20 КБ). Не нужны api_id/api_hash и вход.
+import re as _re, html as _html
+_TME = "https://t.me/s/"
+_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                     "(KHTML, like Gecko) Chrome/140.0 Safari/537.36"}
+_pub = {}            # имя -> {"title","last_id","ok","err","seen"}
+_pub_stop = {}       # имя -> threading.Event
+_POST_RE = _re.compile(r'data-post="([^"/]+)/(\d+)"')
+_TEXT_RE = _re.compile(r'class="tgme_widget_message_text js-message_text[^"]*"[^>]*>')
+_TIME_RE = _re.compile(r'<time datetime="([^"]+)"')
+_TITLE_RE = _re.compile(r'<meta property="og:title" content="([^"]*)"')
+
+def _pub_name(s):
+    """@name / t.me/name / https://t.me/s/name/123 -> name (нижний регистр)."""
+    s = (s or "").strip()
+    m = _re.search(r"(?:t\.me/(?:s/)?|^@?)([A-Za-z][A-Za-z0-9_]{3,31})(?:[/?].*)?$", s)
+    return m.group(1).lower() if m else ""
+
+def _div_inner(page, start):
+    """Содержимое div от позиции после открывающего тега до парного </div>."""
+    depth, i = 1, start
+    while depth and i < len(page):
+        o = page.find("<div", i); c = page.find("</div>", i)
+        if c < 0:
+            return page[start:]
+        if 0 <= o < c:
+            depth += 1; i = o + 4
+        else:
+            depth -= 1; i = c + 6
+    return page[start:i - 6]
+
+def _clean(h):
+    h = _re.sub(r"<br\s*/?>", "\n", h)
+    return _html.unescape(_re.sub(r"<[^>]+>", "", h)).strip()
+
+def _parse_posts(page):
+    """-> [(id, text, iso_time)] по возрастанию id (посты без текста пропускаем)."""
+    out = []
+    marks = [(m.start(), int(m.group(2))) for m in _POST_RE.finditer(page)]
+    for k, (pos, pid) in enumerate(marks):
+        end = marks[k + 1][0] if k + 1 < len(marks) else len(page)
+        block = page[pos:end]
+        t = _TEXT_RE.search(block)
+        text = _clean(_div_inner(block, t.end())) if t else ""
+        tm = _TIME_RE.search(block)
+        if text:
+            out.append((pid, text, tm.group(1) if tm else ""))
+    return sorted(set(out))
+
+def _pub_fetch(sess, name, after=None):
+    url = _TME + name + (f"?after={after}" if after else "")
+    r = sess.get(url, headers=_UA, timeout=15, allow_redirects=False)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    return r.text
+
+def _pub_probe(name):
+    """Проверка канала при добавлении -> (ok, title, err)."""
+    import requests
+    try:
+        page = _pub_fetch(requests.Session(), name)
+    except Exception as e:
+        if "302" in str(e):   # t.me уводит с /s/ — нет публичной ленты
+            return False, "", "не найден или закрытый (без публичной ленты) — такой читается только через вход в аккаунт"
+        return False, "", f"не открылся: {e}"
+    title = _html.unescape((_TITLE_RE.search(page) or [None, name])[1])
+    if not _POST_RE.search(page):
+        return False, title, "нет публичной ленты (канал закрыт, это не канал, или превью отключено)"
+    return True, title, ""
+
+def _age_min(iso):
+    try:
+        from datetime import datetime, timezone
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds() / 60
+    except Exception:
+        return 0
+
+def _pub_loop(name, stop):
+    import requests
+    sess = requests.Session()
+    st = _pub.setdefault(name, {"title": name, "last_id": 0, "ok": False, "err": "", "seen": 0})
+    delay = 2.0
+    while not stop.is_set():
+        try:
+            page = _pub_fetch(sess, name, st["last_id"] or None)
+            m = _TITLE_RE.search(page)
+            if m: st["title"] = _html.unescape(m.group(1))
+            posts = _parse_posts(page)
+            if not st["last_id"]:
+                # первый заход — запомнить, где лента сейчас; старое не озвучиваем
+                ids = [int(x.group(2)) for x in _POST_RE.finditer(page)]
+                st["last_id"] = max(ids) if ids else 0
+            else:
+                new = [p for p in posts if p[0] > st["last_id"]]
+                ids = [int(x.group(2)) for x in _POST_RE.finditer(page)]
+                if ids: st["last_id"] = max(st["last_id"], max(ids))
+                fresh = [p for p in new if _age_min(p[2]) <= 10]   # после обрыва связи — без «археологии»
+                for pid, text, _ in fresh[-3:]:                    # пачкой — максимум 3 последних
+                    st["seen"] += 1
+                    _handle_message(st["title"], text)
+            st.update(ok=True, err="")
+            delay = 2.0
+        except Exception as e:
+            st.update(ok=False, err=str(e)[:120])
+            delay = min(60.0, delay * 2)          # 429/обрыв — отступаем
+        stop.wait(delay + (hash((name, time.time())) % 500) / 1000.0)
+
+def _pub_sync():
+    """Запустить/остановить потоки опроса под список public из конфига (каждые 3 с)."""
+    while True:
+        try:
+            want = set(load().get("public", []))
+            for n in want - set(_pub_stop):
+                ev = threading.Event(); _pub_stop[n] = ev
+                threading.Thread(target=_pub_loop, args=(n, ev), daemon=True).start()
+            for n in set(_pub_stop) - want:
+                _pub_stop.pop(n).set(); _pub.pop(n, None)
+        except Exception:
+            pass
+        time.sleep(3)
 
 # ------------------------------------------------------------------ Telethon-клиент (отдельный поток)
 def _client_thread():
@@ -131,7 +264,8 @@ def _client_thread():
     async def _start():
         await _client.connect()
         if not await _client.is_user_authorized():
-            _state.update(ok=True, authorized=False, err="Нужен вход: запусти tg_login.py")
+            _state.update(ok=True, authorized=False, err="Нужен вход: кнопка «Войти в Телеграм»")
+            await _client.disconnect()   # отпустить сессию: окно входа пишет в тот же файл
             return
         me = await _client.get_me()
         _state.update(ok=True, authorized=True, err="",
@@ -159,10 +293,35 @@ def _client_thread():
         _loop.run_until_complete(_start())
         if _state["authorized"]:
             _loop.run_until_complete(_client.run_until_disconnected())
-        else:
-            _loop.run_forever()   # ждём — вход появится, перезапуск подхватит
     except Exception as e:
-        _state.update(ok=False, err=str(e)[:160])
+        _state.update(ok=False, authorized=False, err=str(e)[:160])
+    finally:
+        # без входа (или после отключения) — закрыть файл сессии; после входа
+        # /reconnect (его зовёт tg_login.py, «Сохранить» и «Обновить список чатов») поднимет заново
+        try: _client.session.close()
+        except Exception: pass
+        _state["authorized"] = False
+
+_thread = None
+_restart_lock = threading.Lock()
+
+def _restart_client(wait=8.0):
+    """Перезапустить Telethon-клиент (после ввода ключей / входа). Ждёт до `wait` с авторизации."""
+    global _thread
+    with _restart_lock:
+        if _thread and _thread.is_alive():
+            if _state.get("authorized"):
+                return True              # уже подключены и слушаем
+            try: asyncio.run_coroutine_threadsafe(_client.disconnect(), _loop).result(timeout=5)
+            except Exception: pass
+            _thread.join(timeout=5)
+        _state.update(ok=False, authorized=False, err="подключаюсь…")
+        _thread = threading.Thread(target=_client_thread, daemon=True)
+        _thread.start()
+    t0 = time.time()
+    while time.time() - t0 < wait and _thread.is_alive() and not _state.get("authorized"):
+        time.sleep(0.3)
+    return bool(_state.get("authorized"))
 
 def _run(coro, timeout=25):
     if not _loop:
@@ -172,18 +331,26 @@ def _run(coro, timeout=25):
 # ------------------------------------------------------------------ HTTP API
 @app.on_event("startup")
 def _startup():
-    threading.Thread(target=_client_thread, daemon=True).start()
+    _restart_client(wait=0)
+    threading.Thread(target=_pub_sync, daemon=True).start()   # публичные каналы без входа
+
+@app.get("/reconnect")
+def reconnect():
+    """Подхватить свежий вход/ключи без перезапуска Nox (зовёт tg_login.py после входа)."""
+    ok = _restart_client()
+    return {"ok": True, "authorized": ok, "err": _state["err"], "me": _state["me"]}
 
 @app.get("/health")
 def health():
     return {"status": "ok" if _state["ok"] else "starting",
-            "authorized": _state["authorized"], "err": _state["err"], "me": _state["me"]}
+            "authorized": _state["authorized"], "err": _state["err"], "me": _state["me"],
+            "public": len(load().get("public", []))}
 
 @app.get("/dialogs")
 def dialogs(limit: int = 200):
     """Список чатов/каналов аккаунта — чтобы выбрать, за какими следить."""
-    if not _state.get("authorized"):
-        return {"ok": False, "text": "Сначала вход: tg_login.py", "items": []}
+    if not _state.get("authorized") and not _restart_client():   # вдруг вход только что сделан
+        return {"ok": False, "text": _state.get("err") or "Сначала вход: «Войти в Телеграм»", "items": []}
     try:
         from telethon import TelegramClient  # noqa
         async def _get():
@@ -241,7 +408,39 @@ def creds_set(api_id: int = 0, api_hash: str = ""):
     if api_id: cfg["api_id"] = int(api_id)
     if api_hash.strip(): cfg["api_hash"] = api_hash.strip()
     save(cfg)
+    threading.Thread(target=_restart_client, daemon=True).start()   # новые ключи — переподключиться
     return {"ok": True, "has_creds": bool(cfg["api_id"] and cfg["api_hash"])}
+
+@app.get("/public_get")
+def public_get():
+    """Публичные каналы без входа + их состояние (название, последний пост, ошибка)."""
+    out = []
+    for n in load().get("public", []):
+        st = _pub.get(n, {})
+        out.append({"name": n, "title": st.get("title", n), "ok": st.get("ok", False),
+                    "err": st.get("err", ""), "last_id": st.get("last_id", 0), "seen": st.get("seen", 0)})
+    return {"channels": out}
+
+@app.get("/public_add")
+def public_add(q: str = ""):
+    """Добавить канал: @имя, имя или ссылка t.me/… Проверяет, что у канала есть публичная лента."""
+    n = _pub_name(q)
+    if not n:
+        return {"ok": False, "text": "Не понял имя канала. Пример: @markettwits или t.me/markettwits"}
+    ok, title, err = _pub_probe(n)
+    if not ok:
+        return {"ok": False, "text": f"{title or n}: {err}"}
+    cfg = load()
+    if n not in cfg["public"]:
+        cfg["public"].append(n); save(cfg)
+    _pub.setdefault(n, {"title": title, "last_id": 0, "ok": False, "err": "", "seen": 0})["title"] = title
+    return {"ok": True, "text": f"Добавлен: {title}", **public_get()}
+
+@app.get("/public_remove")
+def public_remove(q: str = ""):
+    n = _pub_name(q) or q.strip().lower()
+    cfg = load(); cfg["public"] = [x for x in cfg["public"] if x != n]; save(cfg)
+    return {"ok": True, **public_get()}
 
 @app.get("/mon")
 def mon(on: int = -1):

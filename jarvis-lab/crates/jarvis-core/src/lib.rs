@@ -43,17 +43,18 @@ pub mod ipc;
 
 pub mod voices;
 
-// Claude "brain" — conversational fallback via the local `claude` CLI (subscription auth)
+// Мозг — разговорные ответы: облако по API-ключу или локальная Ollama
 pub mod brain;
 
 // Text-to-speech — gives Jarvis a voice (Windows SAPI)
 pub mod tts;
 
-// Screen vision — lets Jarvis "see" the screen via Claude vision
+// Screen vision — отключено (работало только через подписку Claude), см. vision::is_enabled
 pub mod vision;
 
 // T-terminal reader — voice queries about portfolio/quotes (read-only)
 pub mod terminal;
+pub mod shutdown;
 
 pub mod audio_buffer;
 

@@ -1,88 +1,89 @@
-//! Multi-brain — conversational backends with runtime-switchable routing.
+//! Мозг Нокса — разговорные ответы. Ровно ДВА варианта (подписка Claude убрана):
 //!
-//! Backends:
-//!   * **claude** — shells out to the local `claude` CLI (`claude -p`), billed to
-//!     the Claude **subscription** (after a one-time `claude login`). No API key.
-//!   * **openai** — OpenAI-compatible Chat Completions over HTTP. Works with
-//!     ChatGPT (needs an API key) *and* with local OpenAI-compatible servers
-//!     (Ollama, LM Studio) by pointing the base URL at them (no key needed).
+//!   * **openai** — облако по API-ключу: любой OpenAI-совместимый сервис (APIMIRA и т.п.).
+//!     Настройки: `openai_url`, `openai_model`, `api_key__openai` (страница «Мозг»).
+//!   * **ollama** — локально и бесплатно (Ollama на этом ПК, OpenAI-совместимый /v1).
+//!     Настройка: `ollama_model` (напр. qwen2.5:3b).
 //!
-//! The active backend can be switched at runtime (e.g. by voice) via
-//! [`set_backend`], or fixed per launch with `JARVIS_BRAIN_BACKEND`.
+//! Облако не ответило — подстраховка локальной Ollama (если запущена), чтобы Нокс не молчал.
+//! Переключение: страница «Мозг» (app.db + ReloadSettings) или голосом через [`set_backend`].
 //!
-//! Env vars (all optional, no rebuild needed):
-//!   JARVIS_BRAIN          "0"/"false"/"off"/"no" disables the brain (default: on)
-//!   JARVIS_BRAIN_BACKEND  claude | openai | auto            (default: claude)
-//!   JARVIS_BRAIN_SYSTEM   system prompt (shared by all backends)
-//!   JARVIS_BRAIN_TIMEOUT  seconds before giving up          (default: 60)
-//!   -- claude --
-//!   JARVIS_CLAUDE_BIN     full path to the claude launcher   (default: auto-detect)
-//!   JARVIS_BRAIN_MODEL    model id passed to claude `--model`(default: CLI default)
-//!   -- openai / local --
-//!   JARVIS_OPENAI_KEY     API key (empty for local servers)
-//!   JARVIS_OPENAI_URL     base URL (default: https://api.openai.com/v1)
-//!   JARVIS_OPENAI_MODEL   model id (default: gpt-4o-mini)
+//! Env (необязательно): JARVIS_BRAIN=0 — выключить; JARVIS_BRAIN_SYSTEM — системный промпт;
+//! JARVIS_BRAIN_TIMEOUT — таймаут, с (по умолчанию 60).
 
-use std::io::Read;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
-const DEFAULT_SYSTEM: &str = "Ты — Джарвис, голосовой ассистент на ПК. Отвечай кратко (1–3 предложения), по-русски, разговорным тоном. Без markdown, списков и заголовков — только чистый текст, который удобно произнести вслух.\n\nТы работаешь с терминалом Т-Инвестиций и умеешь голосом: читать портфель, котировки любых инструментов (акции, облигации, фонды, фьючерсы, валюты, индексы), стакан, статус торгов и аукционы, а также готовить лимитные заявки с тейк-профитом. Важно: сам ты сделки НЕ совершаешь и деньги не двигаешь — заявки выставляет пользователь.\n\nТы знаешь популярные расширения для терминала Т-Инвестиций: Trading Tools — скальперские кнопки, быстрый ввод объёма и цены, кнопки обновления/удаления заявок в один клик, виджет статистики позиций; в премиуме — лента сделок, сканеры цен и объёмов, лента корпоративных новостей, стаканы рынка США. Stocksi Ultimate — расширенные виджеты и аналитика. Mind Stocks — торговые виджеты и новости MOEX. Если спрашивают про их функции — отвечай по существу.";
+const DEFAULT_SYSTEM: &str = "Ты — Нокс, голосовой ассистент на ПК. Отвечай кратко (1–3 предложения), разговорным тоном, грамотным литературным русским языком: правильные падежи, склонения и окончания, числа согласованы со словами (одна акция, две акции, пять акций; до двадцати одного процента). Иностранные названия и компании — по-русски, без латиницы. Без markdown, списков, заголовков, эмодзи и ссылок — только чистый текст, который удобно произнести вслух.\n\nТы работаешь с терминалом Т-Инвестиций и умеешь голосом: читать портфель, котировки любых инструментов (акции, облигации, фонды, фьючерсы, валюты, индексы), стакан, статус торгов и аукционы, готовить заявки, а по явной команде пользователя — и выставлять их (если это разрешено в настройках). Наблюдатели следят за новостями и нажимают заранее подготовленные заявки. Деньги ты не переводишь.\n\nТы знаешь популярные расширения для терминала Т-Инвестиций: Trading Tools — скальперские кнопки, быстрый ввод объёма и цены, кнопки обновления/удаления заявок в один клик, виджет статистики позиций; в премиуме — лента сделок, сканеры цен и объёмов, лента корпоративных новостей, стаканы рынка США. Stocksi Ultimate — расширенные виджеты и аналитика. Mind Stocks — торговые виджеты и новости MOEX. Если спрашивают про их функции — отвечай по существу.";
 
-/// Which conversational backend handles requests.
+/// Адрес локальной Ollama (OpenAI-совместимый).
+pub const OLLAMA_URL: &str = "http://127.0.0.1:11434/v1";
+const DEFAULT_OLLAMA_MODEL: &str = "qwen2.5:3b";
+const DEFAULT_CLOUD_URL: &str = "https://apimira.com/v1";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
-    Claude,
-    OpenAI,
-    /// Token-saving: prefer the cheaper OpenAI/local backend, fall back to Claude.
-    Auto,
+    /// облако по API-ключу
+    Cloud,
+    /// локальная Ollama
+    Local,
 }
 
 impl Backend {
     fn from_str(s: &str) -> Option<Backend> {
         match s.trim().to_lowercase().as_str() {
-            "claude" | "клод" | "клауд" => Some(Backend::Claude),
-            "openai" | "gpt" | "chatgpt" | "гпт" | "чатгпт" | "джипити" => Some(Backend::OpenAI),
-            "auto" | "авто" => Some(Backend::Auto),
+            "openai" | "cloud" | "api" | "gpt" | "chatgpt" | "облако" | "гпт" => Some(Backend::Cloud),
+            "ollama" | "local" | "локальный" | "олама" | "оллама" => Some(Backend::Local),
+            // старые значения из прежних версий (подписка Claude / авто) -> облако по ключу
+            "claude" | "auto" => Some(Backend::Cloud),
             _ => None,
         }
     }
     pub fn name(self) -> &'static str {
         match self {
-            Backend::Claude => "claude",
-            Backend::OpenAI => "openai",
-            Backend::Auto => "auto",
+            Backend::Cloud => "openai",
+            Backend::Local => "ollama",
         }
     }
 }
 
-/// Read a persisted setting (GUI-controlled) from the shared settings DB.
 fn db_get(key: &str) -> Option<String> {
     crate::DB.get().and_then(|db| db.read().get(key))
 }
 
-static BACKEND: Lazy<Mutex<Backend>> = Lazy::new(|| {
-    // env wins; else the persisted GUI setting; else Claude.
-    let init = std::env::var("JARVIS_BRAIN_BACKEND")
-        .ok()
-        .and_then(|v| Backend::from_str(&v))
-        .or_else(|| db_get("brain_backend").and_then(|v| Backend::from_str(&v)))
-        .unwrap_or(Backend::Claude);
-    Mutex::new(init)
-});
+fn non_empty(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
 
-/// Switch the active backend at runtime. Accepts names/aliases (e.g. "gpt",
-/// "claude", "auto"). Returns the resolved backend name on success.
+/// Из настроек: старый «локальный» выбор хранился как openai + адрес Ollama — тоже считаем локальным.
+fn backend_from_db() -> Backend {
+    let b = db_get("brain_backend").and_then(|v| Backend::from_str(&v)).unwrap_or(Backend::Cloud);
+    let url = db_get("openai_url").unwrap_or_default();
+    if b == Backend::Cloud && url.contains("11434") {
+        Backend::Local
+    } else {
+        b
+    }
+}
+
+static BACKEND: Lazy<Mutex<Backend>> = Lazy::new(|| Mutex::new(backend_from_db()));
+
+/// Переключить мозг на лету («облако» / «ollama» и синонимы). Возвращает имя или None.
 pub fn set_backend(name: &str) -> Option<&'static str> {
     let b = Backend::from_str(name)?;
     *BACKEND.lock() = b;
     Some(b.name())
 }
 
-/// Name of the currently active backend.
+/// Перечитать выбор из настроек (после ReloadSettings).
+pub fn reload_backend() -> &'static str {
+    let b = backend_from_db();
+    *BACKEND.lock() = b;
+    b.name()
+}
+
 pub fn current_backend() -> &'static str {
     BACKEND.lock().name()
 }
@@ -92,10 +93,7 @@ fn enabled() -> bool {
         let v = v.trim().to_lowercase();
         return !(v == "0" || v == "false" || v == "off" || v == "no");
     }
-    if let Some(v) = db_get("brain_enabled") {
-        return v == "true";
-    }
-    true
+    db_get("brain_enabled").map(|v| v == "true").unwrap_or(true)
 }
 
 fn system_prompt() -> String {
@@ -103,175 +101,61 @@ fn system_prompt() -> String {
 }
 
 fn timeout_secs() -> u64 {
-    std::env::var("JARVIS_BRAIN_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(60)
+    std::env::var("JARVIS_BRAIN_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(60)
 }
 
-/// Ask the active brain a question. Returns the plain-text reply on success.
+fn ollama_model() -> String {
+    non_empty(db_get("ollama_model")).unwrap_or_else(|| DEFAULT_OLLAMA_MODEL.to_string())
+}
+
+/// Облако: (адрес, ключ, модель). Если в адресе по старой памяти стоит Ollama — берём облако по умолчанию.
+fn cloud() -> (String, String, String) {
+    let url = non_empty(db_get("openai_url"))
+        .filter(|u| !u.contains("11434"))
+        .unwrap_or_else(|| DEFAULT_CLOUD_URL.to_string());
+    let key = non_empty(db_get("api_key__openai")).unwrap_or_default();
+    let model = non_empty(db_get("openai_model")).unwrap_or_else(|| "openai/gpt-5.4-mini".to_string());
+    (url.trim_end_matches('/').to_string(), key, model)
+}
+
+/// Спросить выбранный мозг. Облако не ответило — подстраховка локальной Ollama.
 pub fn ask(prompt: &str) -> Result<String, String> {
     if !enabled() {
-        return Err("brain disabled (JARVIS_BRAIN=0)".to_string());
+        return Err("brain disabled".to_string());
     }
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return Err("empty prompt".to_string());
     }
-
-    match *BACKEND.lock() {
-        Backend::Claude => ask_claude(prompt),
-        Backend::OpenAI => ask_openai(prompt),
-        Backend::Auto => {
-            // Token-saving: try the cheaper OpenAI/local backend first (if
-            // configured), escalate to Claude on any failure.
-            if openai_configured() {
-                match ask_openai(prompt) {
-                    Ok(a) => Ok(a),
-                    Err(e) => {
-                        log::warn!("openai backend failed ({}); falling back to claude", e);
-                        ask_claude(prompt)
-                    }
+    let backend = *BACKEND.lock();
+    match backend {
+        Backend::Local => chat(OLLAMA_URL, "", &ollama_model(), prompt, timeout_secs()),
+        Backend::Cloud => {
+            let (url, key, model) = cloud();
+            // облако иногда виснет: ждём максимум CLOUD_TIMEOUT с, потом отвечает локальная Ollama
+            match chat(&url, &key, &model, prompt, CLOUD_TIMEOUT) {
+                Ok(a) => Ok(a),
+                Err(e) => {
+                    log::warn!("cloud brain failed ({}); trying local Ollama", e);
+                    chat(OLLAMA_URL, "", &ollama_model(), prompt, timeout_secs()).map_err(|e2| format!("{}; ollama: {}", e, e2))
                 }
-            } else {
-                ask_claude(prompt)
             }
         }
     }
 }
 
-// ----------------------------- Claude backend -----------------------------
-
-/// Resolve the `claude` launcher. On Windows npm installs a `claude.cmd` shim.
-fn claude_bin() -> String {
-    if let Ok(p) = std::env::var("JARVIS_CLAUDE_BIN") {
-        if !p.trim().is_empty() {
-            return p;
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let shim = format!("{}\\npm\\claude.cmd", appdata);
-            if std::path::Path::new(&shim).exists() {
-                return shim;
-            }
-        }
-    }
-    "claude".to_string()
-}
-
-fn ask_claude(prompt: &str) -> Result<String, String> {
-    let system = system_prompt();
-    let timeout = timeout_secs();
-
-    let bin = claude_bin();
-    let mut cmd = Command::new(&bin);
-    cmd.arg("-p")
-        .arg(prompt)
-        .arg("--append-system-prompt")
-        .arg(&system);
-    // Модель Claude: env -> DB -> по умолчанию Sonnet (Haiku намеренно не используем).
-    let claude_model = std::env::var("JARVIS_BRAIN_MODEL")
-        .ok()
-        .filter(|m| !m.trim().is_empty())
-        .or_else(|| db_get("brain_model").filter(|m| !m.trim().is_empty()))
-        .unwrap_or_else(|| "sonnet".to_string());
-    cmd.arg("--model").arg(claude_model.trim());
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to launch '{}': {}", bin, e))?;
-
-    let mut out_pipe = child.stdout.take().unwrap();
-    let mut err_pipe = child.stderr.take().unwrap();
-    let out_handle = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = out_pipe.read_to_string(&mut s);
-        s
-    });
-    let err_handle = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = err_pipe.read_to_string(&mut s);
-        s
-    });
-
-    let deadline = Instant::now() + Duration::from_secs(timeout);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("claude timed out after {}s", timeout));
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => return Err(format!("wait failed: {}", e)),
-        }
-    };
-
-    let stdout = out_handle.join().unwrap_or_default().trim().to_string();
-    let stderr = err_handle.join().unwrap_or_default().trim().to_string();
-
-    if status.success() && !stdout.is_empty() {
-        Ok(stdout)
-    } else if !stderr.is_empty() {
-        Err(stderr)
-    } else if !stdout.is_empty() {
-        Err(stdout)
-    } else {
-        Err("claude returned an empty response".to_string())
-    }
-}
-
-// -------------------------- OpenAI / local backend --------------------------
-
-fn openai_url() -> String {
-    std::env::var("JARVIS_OPENAI_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| db_get("openai_url").filter(|s| !s.trim().is_empty()))
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
-        .trim_end_matches('/')
-        .to_string()
-}
-
-fn openai_key() -> String {
-    std::env::var("JARVIS_OPENAI_KEY")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| db_get("api_key__openai").filter(|s| !s.trim().is_empty()))
-        .unwrap_or_default()
-}
-
-/// Considered usable if an API key is set (ChatGPT) or a custom base URL is set
-/// (a local OpenAI-compatible server needs no key).
-fn openai_configured() -> bool {
-    !openai_key().trim().is_empty()
-        || std::env::var("JARVIS_OPENAI_URL").is_ok()
-        || db_get("openai_url").map(|s| !s.trim().is_empty()).unwrap_or(false)
-}
+/// Сколько ждать облако, прежде чем спросить локальную Ollama.
+const CLOUD_TIMEOUT: u64 = 12;
 
 #[cfg(not(feature = "reqwest"))]
-fn ask_openai(_prompt: &str) -> Result<String, String> {
-    Err("openai backend not built (reqwest feature disabled)".to_string())
+fn chat(_url: &str, _key: &str, _model: &str, _prompt: &str, _timeout: u64) -> Result<String, String> {
+    Err("brain not built (reqwest feature disabled)".to_string())
 }
 
+/// OpenAI-совместимый /chat/completions (облако или Ollama).
 #[cfg(feature = "reqwest")]
-fn ask_openai(prompt: &str) -> Result<String, String> {
-    let url = format!("{}/chat/completions", openai_url());
-    let key = openai_key();
-    let model = std::env::var("JARVIS_OPENAI_MODEL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| db_get("openai_model").filter(|s| !s.trim().is_empty()))
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
-
+fn chat(base: &str, key: &str, model: &str, prompt: &str, timeout: u64) -> Result<String, String> {
+    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
     let body = serde_json::json!({
         "model": model,
         "messages": [
@@ -280,11 +164,11 @@ fn ask_openai(prompt: &str) -> Result<String, String> {
         ],
         "temperature": 0.7,
         "max_tokens": 180,      // короткие ответы -> быстрее ответ и короче озвучка
-        "keep_alive": "30m",    // держать модель в VRAM (Ollama) -> без холодных стартов
+        "keep_alive": "30m",    // Ollama: держать модель в VRAM -> без холодных стартов
     });
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs()))
+        .timeout(Duration::from_secs(timeout))
         .build()
         .map_err(|e| format!("http client error: {}", e))?;
 
@@ -293,25 +177,18 @@ fn ask_openai(prompt: &str) -> Result<String, String> {
         req = req.bearer_auth(key.trim());
     }
 
-    let resp = req.send().map_err(|e| format!("openai request failed: {}", e))?;
+    let resp = req.send().map_err(|e| format!("request failed: {}", e))?;
     let status = resp.status();
-    let val: serde_json::Value = resp
-        .json()
-        .map_err(|e| format!("openai: bad JSON response: {}", e))?;
+    let val: serde_json::Value = resp.json().map_err(|e| format!("bad JSON response: {}", e))?;
 
     if !status.is_success() {
         let msg = val["error"]["message"].as_str().unwrap_or("unknown error");
-        return Err(format!("openai HTTP {}: {}", status.as_u16(), msg));
+        return Err(format!("HTTP {}: {}", status.as_u16(), msg));
     }
 
-    let content = val["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
+    let content = val["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
     if content.is_empty() {
-        Err("openai returned an empty response".to_string())
+        Err("empty response".to_string())
     } else {
         Ok(content)
     }

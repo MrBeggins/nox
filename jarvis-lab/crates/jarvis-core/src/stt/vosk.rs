@@ -119,6 +119,19 @@ pub fn recognize_speech(data: &[i16]) -> Option<String> {
 }
 
 
+/// Принудительно завершить текущую фразу и вернуть недосказанный хвост (то, что Vosk
+/// ещё держит как частичный результат). Нужен, чтобы при паузе/таймауте не терять текст.
+pub fn finalize_speech() -> Option<String> {
+    let mut recognizer = SPEECH_RECOGNIZER.get()?.lock();
+    let text = recognizer
+        .final_result()
+        .multiple()
+        .and_then(|m| m.alternatives.first().map(|a| a.text.to_string()))
+        .unwrap_or_default();
+    let text = text.trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
 pub fn reset_speech_recognizer() {
     if let Some(recognizer) = SPEECH_RECOGNIZER.get() {
         recognizer.lock().reset();

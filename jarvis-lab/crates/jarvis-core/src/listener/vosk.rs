@@ -18,20 +18,28 @@ pub fn data_callback(frame_buffer: &[i16]) -> Option<i32> {
         // language-specific wake phrase
         let lang = i18n::get_language();
         let wake_phrases = config::get_wake_phrases(&lang);
+        // Своё слово (не «джарвис») распознаётся СВОБОДНО, по частичным результатам —
+        // поэтому сверка строже: короткие слова («но», «ок», «он») отбрасываем,
+        // порог схожести выше. Иначе будит любая речь вокруг.
+        let custom = !config::wake_is_default();
+        let min_ratio = if custom { 80.0 } else { config::VOSK_MIN_RATIO };
 
         // verify with seqdiff ratio
         for word in recognized.split_whitespace() {
             if word == "[unk]" {
                 continue;
             }
-            
+
             let word_chars: Vec<char> = word.chars().collect();
-            
+            if custom && (word_chars.len() < 4 || word_chars.len() > 8) {
+                continue;
+            }
+
             for wake_phrase in &wake_phrases {
                 let wake_chars: Vec<char> = wake_phrase.chars().collect();
                 let similarity = seqdiff::ratio(&wake_chars, &word_chars);
-                
-                if similarity >= config::VOSK_MIN_RATIO {
+
+                if similarity >= min_ratio {
                     info!("Wake word match: '{}' ~ '{}' ({:.1}%)", word, wake_phrase, similarity);
                     return Some(0);
                 }

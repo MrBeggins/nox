@@ -18,6 +18,8 @@
     // Окна Nox
     const views = [
         { path: "/",          name: "Пульс",          icon: "◉" },
+        { path: "/models",    name: "Мозг",           icon: "✦" },
+        { path: "/watchers",  name: "Наблюдатели",    icon: "⊙" },
         { path: "/calendar",  name: "Календарь",      icon: "🗓" },
         { path: "/widgets",   name: "Сетка виджетов", icon: "▦" },
         { path: "/settings",  name: "Настройки",      icon: "⚙" },
@@ -25,7 +27,6 @@
     const extra = [
         { path: "/commands",  name: "Команды",   icon: "⌘" },
         { path: "/modes",     name: "Режимы",    icon: "⚙" },
-        { path: "/models",    name: "ИИ-модели", icon: "✦" },
         { path: "/tterminal", name: "Т-Терминал", icon: "₮" },
     ]
 

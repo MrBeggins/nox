@@ -17,9 +17,19 @@ export const lastAssistantReply = writable("")
 export type FeedItem = { time: string; text: string }
 export const recentReplies = writable<FeedItem[]>([])
 
+// анти-дубль: одинаковый текст за последние 60 с в ленту второй раз не пишем
+const recentSeen = new Map<string, number>()
+
 function pushFeed(text: string) {
     const clean = (text || "").trim()
     if (!clean) return
+    const nowMs = Date.now()
+    const seen = recentSeen.get(clean)
+    if (seen && nowMs - seen < 60_000) return
+    recentSeen.set(clean, nowMs)
+    if (recentSeen.size > 100) {
+        for (const [k, t] of recentSeen) if (nowMs - t > 60_000) recentSeen.delete(k)
+    }
     const now = new Date()
     const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`
     recentReplies.update((list) => [{ time, text: clean }, ...list].slice(0, 12))
@@ -47,7 +57,15 @@ export function disableIpc() {
 }
 
 export function connectIpc(port: number = 9712) {
-    if (ws?.readyState === WebSocket.OPEN) return
+    // уже подключены ИЛИ подключаемся — второй сокет не создаём (иначе каждое событие
+    // приходит дважды и лента дублируется)
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+
+    // старый (закрытый/закрывающийся) сокет — отвязать, чтобы его события не долетали
+    if (ws) {
+        ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null
+        try { ws.close() } catch (e) {}
+    }
 
     ws = new WebSocket(`ws://127.0.0.1:${port}`)
 
@@ -179,6 +197,10 @@ export function reloadCommands() {
 
 export function reloadSettings() {
     return sendAction("reload_settings")
+}
+
+export function abortSpeech() {
+    return sendAction("abort_speech")
 }
 
 export function sendIpcMessage(message: object): Promise<void> {

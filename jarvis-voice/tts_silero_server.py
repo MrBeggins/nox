@@ -13,7 +13,17 @@ import torch
 
 MODEL_PATH = r"C:\jarvis-voice\models\silero\v4_ru.pt"
 MODEL_URL  = "https://models.silero.ai/models/tts/ru/v4_ru.pt"
-SPEAKER    = os.environ.get("NOX_SILERO_SPEAKER", "aidar")   # aidar/eugene(муж), baya/kseniya/xenia(жен)
+_SPEAKER_FILE = r"C:\jarvis-voice\tts_silero_speaker.txt"
+SPEAKERS = ["aidar", "eugene", "baya", "kseniya", "xenia"]   # aidar/eugene — муж., остальные — жен.
+def _load_speaker():
+    try:
+        v = open(_SPEAKER_FILE, encoding="utf-8").read().strip()
+        if v in SPEAKERS:
+            return v
+    except Exception:
+        pass
+    return os.environ.get("NOX_SILERO_SPEAKER", "aidar")
+SPEAKER = _load_speaker()
 SAMPLE_RATE = 48000
 _SPEED_FILE = r"C:\jarvis-voice\tts_speed.txt"
 
@@ -45,9 +55,23 @@ try:
 except Exception:
     def _n2w(n): return str(n)
 
+try:
+    import nox_textnorm as _ntn
+except Exception:
+    _ntn = None
+try:
+    import nox_accent as _nacc      # ударения по смыслу (замок/замок, стоит/стоит) — пометки «+» для Silero
+except Exception:
+    _nacc = None
+
 _DEC = re.compile(r"\d+[.,]\d+")
 _INT = re.compile(r"\d+")
 def _normalize(text):
+    if _ntn:
+        try:
+            return _ntn.normalize(text)     # единый русский нормализатор (числа/падежи/аббр/латиница)
+        except Exception:
+            pass
     t = text.replace("%", " процентов").replace("№", " номер ")
     t = t.replace("$", " долларов").replace("₽", " рублей").replace("€", " евро")
     def dec(m):
@@ -71,6 +95,8 @@ def _xml_escape(s):
 def synth(text: str, speed: float = 1.0) -> bytes:
     _ensure_model()
     norm = _normalize(text).strip() or "."
+    if _nacc:
+        norm = _nacc.accent(norm)
     if _user_speed:
         speed = _user_speed
     speed = max(0.7, min(1.5, float(speed)))
@@ -86,6 +112,9 @@ def synth(text: str, speed: float = 1.0) -> bytes:
     wav = audio.numpy().astype(np.float32)
     peak = float(np.max(np.abs(wav))) or 1.0
     wav = wav / peak * 0.95
+    # тишина по краям: проигрыватель не «съедает» первый звук и последний слог («добрый вечер, с…»)
+    wav = np.concatenate([np.zeros(int(SAMPLE_RATE * 0.05), np.float32), wav,
+                          np.zeros(int(SAMPLE_RATE * 0.30), np.float32)])
     buf = io.BytesIO()
     sf.write(buf, wav, SAMPLE_RATE, format="WAV", subtype="PCM_16")
     return buf.getvalue()
@@ -103,6 +132,8 @@ class Req(BaseModel):
 
 @app.on_event("startup")
 def _warmup():
+    if _nacc:
+        _nacc.start_loading()        # RUAccent ~15-40 с в фоне; до загрузки ударения ставит сам Silero
     def _w():
         try:
             _ensure_model()
@@ -115,7 +146,22 @@ def _warmup():
 @app.get("/health")
 def health():
     return {"status": "ok" if _model is not None else "starting",
-            "device": "cpu", "engine": "silero", "speaker": SPEAKER}
+            "device": "cpu", "engine": "silero", "speaker": SPEAKER,
+            "accent": bool(_nacc and _nacc.ready())}   # ударения по смыслу (RUAccent) загружены
+
+@app.get("/speakers")
+def speakers():
+    return {"current": SPEAKER, "available": SPEAKERS}
+
+@app.get("/set_speaker")
+def set_speaker(name: str = ""):
+    global SPEAKER
+    if name in SPEAKERS:
+        SPEAKER = name
+        try: open(_SPEAKER_FILE, "w", encoding="utf-8").write(name)
+        except Exception: pass
+        return {"ok": True, "speaker": SPEAKER}
+    return {"ok": False, "speaker": SPEAKER, "available": SPEAKERS}
 
 @app.get("/speed")
 def get_speed():

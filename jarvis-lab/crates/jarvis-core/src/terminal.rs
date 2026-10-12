@@ -76,6 +76,7 @@ fn extract_instrument(t: &str) -> String {
         "продай", "продать", "продам", "продажу", "продажа",
         "закрой", "закрыть", "закрытие", "закрывай", "закрою", "закрытия",
         "выстави", "выставь", "поставь", "отправь", "исполни", "соверши", "открой", "сделай",
+        "всё", "все", "сейчас", "срочно",
         // структура/шум
         "заявку", "заявка", "заявки", "ордер", "на", "по", "в", "и",
         "позицию", "позиции", "позиция", "позу", "сделку", "сделки", "сделка",
@@ -93,8 +94,10 @@ fn extract_instrument(t: &str) -> String {
         .join(" ")
 }
 
-/// Разбор команды подготовки заявки: "купи 10 сбер по 280 тейк 300".
-fn parse_order(t: &str) -> Option<String> {
+/// Разбор команды заявки: "купи 10 сбер по 280 тейк 300".
+/// `execute = false` — только заполнить виджет; `true` — заполнить и нажать Купить/Продать
+/// (ридер жмёт, только если в Настройках включено «Исполнять заявки голосом» и заявка в лимитах).
+fn parse_order(t: &str, execute: bool) -> Option<String> {
     let side = if t.contains("прод") { "sell" } else { "buy" };
     let words: Vec<&str> = t.split_whitespace().collect();
 
@@ -124,14 +127,16 @@ fn parse_order(t: &str) -> Option<String> {
         return Some("Уточните инструмент для заявки, сэр.".to_string());
     }
 
-    let _ = tp; // тейк в заполнение виджета v1 не переносим
+    let _ = tp; // тейк в заполнение виджета v1 переносим
     let price_s = format!("{}", price);
     let qty_s = format!("{}", qty);
-    // Заполняем виджет «Заявка» в терминале (тикер/объём/цена). Кнопку жмёт пользователь.
+    // Заполняем виджет «Заявка» (тикер/объём/цена); при execute ридер ещё и жмёт кнопку.
+    // said — исходная фраза, ридер пишет её в журнал заявок.
     Some(fetch_mind(
         "/fill_order",
         &[("q", inst.as_str()), ("side", side), ("qty", qty_s.as_str()),
-          ("price", price_s.as_str()), ("close", "0")],
+          ("price", price_s.as_str()), ("close", "0"),
+          ("exec", if execute { "1" } else { "0" }), ("said", t)],
     ))
 }
 
@@ -141,6 +146,32 @@ pub fn try_handle(text: &str) -> Option<String> {
         return None;
     }
     let t = text.to_lowercase();
+
+    // Явная команда ИСПОЛНИТЬ -> заполнить виджет и нажать Купить/Продать.
+    // Проверяем ДО «закрытия» и подготовки, иначе фразу перехватят ветки, которые только заполняют.
+    // «купи всё» намеренно не здесь: объёма у него нет, а close=1 по длинной позиции дал бы ПРОДАЖУ.
+    let exec_intent = t.contains("выстави") || t.contains("выставь") || t.contains("поставь заявк")
+        || t.contains("отправь заявк") || t.contains("исполни заявк") || t.contains("соверши сделк")
+        || t.contains("открой сделк") || t.contains("продай всё") || t.contains("продай все")
+        || t.contains("сделай сделк");
+    if exec_intent {
+        // «продай всё X» / «выставь закрытие X» -> закрыть всю позицию (объём и сторона — из портфеля)
+        let close_all = t.contains("продай всё") || t.contains("продай все") || t.contains("закр");
+        if close_all {
+            let q = extract_instrument(&t);
+            if q.trim().is_empty() {
+                return Some("По какому инструменту закрыть позицию, сэр?".to_string());
+            }
+            let words: Vec<&str> = t.split_whitespace().collect();
+            let price_s = format!("{}", number_after(&words, "по").unwrap_or(0.0));
+            return Some(fetch_mind(
+                "/fill_order",
+                &[("q", q.as_str()), ("close", "1"), ("price", price_s.as_str()),
+                  ("exec", "1"), ("said", t.as_str())],
+            ));
+        }
+        return parse_order(&t, true);
+    }
 
     // Закрытие позиции -> ГОТОВИМ заявку (объём берём из портфеля), не исполняем
     if t.contains("закр") && (t.contains("позиц") || t.contains("сделк")
@@ -160,28 +191,21 @@ pub fn try_handle(text: &str) -> Option<String> {
         ));
     }
 
-    // Явная попытка ИСПОЛНИТЬ сделку -> честный отказ (чтобы мозг не выдумывал, что выставил)
-    let exec_intent = t.contains("выстави") || t.contains("выставь") || t.contains("поставь заявк")
-        || t.contains("отправь заявк") || t.contains("исполни заявк") || t.contains("соверши сделк")
-        || t.contains("открой сделк") || t.contains("продай всё") || t.contains("продай все")
-        || t.contains("купи всё") || t.contains("купи все") || t.contains("сделай сделк");
-    if exec_intent {
-        return Some("Я не выставляю заявки и не совершаю сделок, сэр. Но могу их подготовить — скажите, например: подготовь продажу десяти акций Сбербанка по двести восемьдесят, или закрой позицию по Сбербанку. Кнопку в терминале нажимаете вы.".to_string());
-    }
-
-    // Минфин — валютные операции (бюджетное правило): зачитать последнюю цифру из ленты
-    if t.contains("минфин")
-        && (t.contains("валют") || t.contains("купил") || t.contains("покуп")
-            || t.contains("продаж") || t.contains("бюджетн"))
+    // «объясни / про что / откуда последняя новость» -> берём текст из ленты и просим мозг объяснить
+    if t.contains("новост")
+        && (t.contains("объясн") || t.contains("поясни") || t.contains("про что")
+            || t.contains("о чём") || t.contains("о чем") || t.contains("откуда")
+            || t.contains("что за") || t.contains("расскажи") || t.contains("подробн"))
     {
-        return Some(fetch_mind("/minfin", &[]));
-    }
-
-    // Боевая слежка: купон ГК Самолёт (SMLT) — погашение / техдефолт
-    if t.contains("самол") && (t.contains("купон") || t.contains("дефолт") || t.contains("облига")
-        || t.contains("погас") || t.contains("выплат"))
-    {
-        return Some(fetch_mind("/task_samolet", &[("on", "1")]));
+        let news = fetch_mind("/last_news", &[]);
+        if news.trim().is_empty() {
+            return Some("Пока не вижу новостей в ленте, сэр.".to_string());
+        }
+        let prompt = format!(
+            "Объясни простыми словами по-русски эту биржевую новость и почему она важна, 2-3 коротких предложения: {}",
+            news
+        );
+        return Some(crate::brain::ask(&prompt).unwrap_or(news));
     }
 
     // ===================== ПОМОЩНИК: монитор ПК / открытие / заметки / напоминания =====================
@@ -197,6 +221,28 @@ pub fn try_handle(text: &str) -> Option<String> {
             return Some(fetch_at(SYS_URL, "/mon", &[("on", "1")], "монитор"));
         }
         return Some(fetch_at(SYS_URL, "/stats", &[], "монитор"));
+    }
+
+    // Наблюдатели «мультимозг»: «наблюдай …», «следи весь день за …», «следи за новостью про …».
+    // (Нагрузка/магеллан/монитор новостей сюда не попадают: нужен явный маркёр наблюдателя.)
+    let watch_trigger = t.starts_with("наблюдай") || t.starts_with("последи") || t.starts_with("отслеживай")
+        || t.contains("создай наблюдател") || t.contains("добавь наблюдател")
+        || (t.starts_with("следи") && t.contains("весь день"))
+        || ((t.contains("следи") || t.contains("лови") || t.contains("жди")
+             || t.contains("сообщи когда") || t.contains("дай знать когда"))
+            && t.contains("новост") && t.contains("про"));
+    if watch_trigger {
+        return Some(fetch_at(MIND_URL, "/watch_voice", &[("text", t.as_str())], "наблюдатель"));
+    }
+
+    // Интернет: живые данные и факты -> поиск через Яндекс-браузер + ответ мозгом
+    let web_ask = t.contains("погод")
+        || t.contains("курс ") || t.contains("курс доллар") || t.contains("курс евро")
+        || t.contains("в интернете") || t.contains("в сети") || t.contains("поищи ")
+        || t.contains("узнай ") || t.contains("посмотри в интернете") || t.contains("посмотри в сети")
+        || t.contains("кто такой") || t.contains("кто такая") || t.contains("что такое");
+    if web_ask {
+        return Some(fetch_at(MIND_URL, "/web_answer", &[("q", t.as_str())], "интернет"));
     }
 
     // Заметки: «запомни …» / «мои заметки»
@@ -387,7 +433,7 @@ pub fn try_handle(text: &str) -> Option<String> {
         || t.starts_with("продай"))
         && (t.contains("куп") || t.contains("прод") || t.contains("заявк"));
     if is_order {
-        return parse_order(&t);
+        return parse_order(&t, false);
     }
 
     // Стакан
@@ -597,6 +643,33 @@ fn fetch_bls(path: &str, query: &[(&str, &str)]) -> String {
     }
 }
 
+/// Роутер «мозг-первым»: запрос -> /route (мозг решает действие). Возвращает ответ для
+/// озвучки, либо None если это команда программе («__LOCAL__») или сервис недоступен —
+/// тогда вызывающий идёт обычным путём (команды/терминал/мозг-фоллбэк).
+#[cfg(feature = "reqwest")]
+pub fn route(text: &str) -> Option<String> {
+    if !enabled() {
+        return None;
+    }
+    // роутер сам укладывается в ~10 с (облако 9 с с дублем, затем Ollama) — 30 с ожидания больше не нужно
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .ok()?;
+    let url = reqwest::Url::parse_with_params(&format!("{}/route", MIND_URL), &[("text", text)]).ok()?;
+    let v: serde_json::Value = client.get(url).send().ok()?.json().ok()?;
+    let a = v["text"].as_str().unwrap_or("").trim().to_string();
+    if a.is_empty() || a == "__LOCAL__" || a.contains("недоступен") {
+        None
+    } else {
+        Some(a)
+    }
+}
+#[cfg(not(feature = "reqwest"))]
+pub fn route(_text: &str) -> Option<String> {
+    None
+}
+
 /// Универсальный GET к локальному сервису-помощнику (монитор/заметки и т.п.): берём поле "text".
 #[cfg(feature = "reqwest")]
 fn fetch_at(base_url: &str, path: &str, query: &[(&str, &str)], label: &str) -> String {
@@ -665,8 +738,10 @@ fn us_join(a: String, b: String) -> String {
 
 #[cfg(feature = "reqwest")]
 fn fetch_mind(path: &str, query: &[(&str, &str)]) -> String {
+    // 70с > таймаутов ридера (заполнение 40с + нажатие 20с): иначе Нокс скажет «недоступен»,
+    // а заявка в это время уйдёт
     let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(70))
         .build()
     {
         Ok(c) => c,

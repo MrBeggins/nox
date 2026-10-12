@@ -33,16 +33,36 @@ def main():
     cfg.setdefault("mon", True)
     _save(cfg)
 
+    from getpass import getpass
     from telethon import TelegramClient
-    with TelegramClient(SESSION, int(api_id), api_hash) as client:
+    client = TelegramClient(SESSION, int(api_id), api_hash)
+    client.start(phone=lambda: input("Телефон в международном формате (+7...): ").strip(),
+                 code_callback=lambda: input("Код из Telegram (придёт в приложение): ").strip(),
+                 password=lambda: getpass("Облачный пароль 2FA (символы не отображаются): "))
+    try:
         me = client.get_me()
         uname = getattr(me, "username", None) or getattr(me, "first_name", "") or "аккаунт"
         print(f"\nУспешный вход как: {uname}")
-        print("Сессия сохранена. Теперь запусти tg_reader (или перезапусти Nox) и выбери чаты в настройках.")
+    finally:
+        client.disconnect()
+        client.session.close()   # отпустить файл сессии для tg_reader
+    # разбудить tg_reader — подхватит сессию без перезапуска Nox
+    try:
+        import urllib.request
+        r = json.loads(urllib.request.urlopen("http://127.0.0.1:8131/reconnect", timeout=20).read())
+        print("Нокс подключился к Телеграму." if r.get("authorized")
+              else "Сессия сохранена; Нокс подключится при «Обновить список чатов».")
+    except Exception:
+        print("Сессия сохранена; Нокс подключится при следующем запуске.")
+    print("Дальше: Настройки → Телеграм → «Обновить список чатов» → отметить чаты → «Сохранить выбор».")
 
 if __name__ == "__main__":
+    code = 0
     try:
         main()
     except Exception as e:
         print("Ошибка входа:", e)
-        sys.exit(1)
+        code = 1
+    try: input("\nНажмите Enter, чтобы закрыть окно.")
+    except Exception: pass
+    sys.exit(code)

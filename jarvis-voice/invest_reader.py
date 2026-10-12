@@ -416,6 +416,47 @@ def resolve_strict(query: str):
 def resolve_ep(q: str = ""):
     return {"found": bool(resolve_strict(q))}
 
+def resolve_future_for(inst, month=0):
+    """Фьючерс на бумагу inst (акция) с месяцем экспирации month (0 — ближайший): «LKOH-12.26 Лукойл» -> LKZ6.
+    Код в названии контракта = тикер акции (LKOH) или имя бумаги в хвосте названия."""
+    tk = (inst.get("ticker") or "").upper()
+    nm = _norm(inst.get("name", ""))
+    now = datetime.date.today()
+    cands = []
+    for it in _INDEX["items"]:
+        if it.get("type") != "future":
+            continue
+        m = re.match(r"^([A-Za-z]+)-(\d{1,2})\.(\d{2})\b(.*)$", it.get("name", ""))
+        if not m:
+            continue
+        base, mon, yy, rest = m.group(1).upper(), int(m.group(2)), int(m.group(3)), _norm(m.group(4))
+        if base != tk and not (nm and nm in rest):
+            continue
+        if month and mon != int(month):
+            continue
+        try:
+            cands.append((datetime.date(2000 + yy, mon, 20), it))
+        except ValueError:
+            continue
+    if not cands:
+        return None
+    active = [c for c in cands if c[0] >= now]
+    return (min(active, key=lambda c: c[0]) if active else max(cands, key=lambda c: c[0]))[1]
+
+@app.get("/ticker")
+def ticker_ep(q: str = "", kind: str = "", month: int = 0):
+    """Название/склонение -> тикер (для наблюдателей: «газпрома» -> GAZP).
+    kind=future (+month) — фьючерс на эту бумагу: q=лукойл, month=12 -> LKZ6."""
+    if not ensure_catalog() or not q.strip():
+        return {"ticker": "", "name": ""}
+    inst = resolve(q)
+    if inst and kind == "future" and inst.get("type") != "future":
+        inst = resolve_future_for(inst, month)
+    if not inst:
+        return {"ticker": "", "name": ""}
+    return {"ticker": (inst.get("ticker") or "").upper(), "name": inst.get("name", ""),
+            "lot": inst.get("lot", 1), "type": inst.get("type", "")}
+
 @app.get("/quote")
 def quote(q: str = ""):
     token = get_token()
@@ -688,6 +729,11 @@ def order_plan(q: str = "", side: str = "buy", qty: int = 1, price: float = 0.0,
         lots = max(1, int(qty or 1))
     px = float(price or 0.0)
     typ = "limit" if px > 0 else "market"
+    # последняя цена — для оценки суммы рыночной заявки (лимит голосового исполнения в рублях)
+    try:
+        last = last_price(figi, token)
+    except Exception:
+        last = 0.0
     side_word = "покупку" if side == "buy" else "продажу"
     parts = [f"Заявка в терминале: {name}, {num2words(lots, lang='ru')} {plural(lots, ('лот','лота','лотов'))}"]
     if lot > 1:
@@ -696,7 +742,7 @@ def order_plan(q: str = "", side: str = "buy", qty: int = 1, price: float = 0.0,
     parts.append("на закрытие." if close else f"на {side_word}.")
     parts.append("Проверьте и нажмите Купить или Продать, сэр — сделку я не совершаю.")
     return {"ok": True, "ticker": ticker, "name": name, "figi": figi,
-            "lots": lots, "lot": lot, "price": px, "type": typ, "side": side,
+            "lots": lots, "lot": lot, "price": px, "type": typ, "side": side, "last": last,
             "text": " ".join(parts)}
 
 if __name__ == "__main__":

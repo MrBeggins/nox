@@ -63,6 +63,12 @@ fn main_loop(text_cmd_rx: Receiver<String>, rt: &tokio::runtime::Runtime) -> Res
         // Активация «кнопкой» (глобальный хоткей / трей): слушаем команду СРАЗУ,
         // без слова-активации. Работает даже при mute и при выключенном wake word.
         if crate::ACTIVATE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            if crate::MUTED.load(std::sync::atomic::Ordering::Relaxed) {
+                // микрофон выключен — не слушаем даже по кнопке, только подсказка в ленту
+                ipc::send(IpcEvent::AssistantReply { text: "Микрофон выключен — включите его на Пульсе.".to_string() });
+                ipc::send(IpcEvent::Idle);
+                continue 'wake_word;
+            }
             info!("Activation by hotkey/button");
             ipc::send(IpcEvent::WakeWordDetected);
             voices::play_reply();
@@ -83,9 +89,11 @@ fn main_loop(text_cmd_rx: Receiver<String>, rt: &tokio::runtime::Runtime) -> Res
 
         recorder::read_microphone(&mut frame_buffer);
 
-        // Микрофон отключён (mute): читаем, но не слушаем и не реагируем.
-        // Текстовые команды из GUI при этом продолжают работать (выше по циклу).
-        if crate::MUTED.load(std::sync::atomic::Ordering::Relaxed) {
+        // Микрофон отключён (mute) или «Не беспокоить»: читаем, но не слушаем и не реагируем
+        // на голос. Текстовые команды и хоткей (осознанные действия) работают (выше по циклу).
+        if crate::MUTED.load(std::sync::atomic::Ordering::Relaxed)
+            || crate::DND.load(std::sync::atomic::Ordering::Relaxed)
+        {
             continue 'wake_word;
         }
 
@@ -181,7 +189,81 @@ fn main_loop(text_cmd_rx: Receiver<String>, rt: &tokio::runtime::Runtime) -> Res
 }
 
 
-// Voice recognition for command after wake word
+/// Итог обработки одной законченной фразы.
+enum PhraseOutcome {
+    /// пустое/слишком короткое — слушаем дальше
+    Ignore,
+    /// произнесено только слово активации — отклик и слушаем заново
+    Reactivate,
+    /// команда исполнена; true — можно дослушать уточнение
+    Executed(bool),
+}
+
+/// Склеить кусок распознанного текста с уже накопленным.
+fn append_text(acc: &mut String, piece: &str) {
+    let p = piece.trim();
+    if p.is_empty() {
+        return;
+    }
+    if !acc.is_empty() {
+        acc.push(' ');
+    }
+    acc.push_str(p);
+}
+
+/// Выбросить из буфера микрофона то, что накопилось, пока Нокс думал и говорил:
+/// там эхо его собственного ответа, его нельзя принимать за команду.
+/// Буферизованные кадры читаются мгновенно, «живые» — раз в ~32 мс.
+fn drain_mic(frame_buffer: &mut [i16]) {
+    for _ in 0..400 {
+        let t = std::time::Instant::now();
+        recorder::read_microphone(frame_buffer);
+        if t.elapsed() > std::time::Duration::from_millis(15) {
+            break; // догнали реальное время
+        }
+    }
+}
+
+/// Законченная фраза: снять слово активации/служебные слова и исполнить.
+fn handle_phrase(raw: &str, first_recognition: &mut bool, rt: &tokio::runtime::Runtime) -> PhraseOutcome {
+    let mut voice = raw.trim().to_lowercase();
+    if voice.is_empty() {
+        return PhraseOutcome::Ignore;
+    }
+    info!("Recognized voice: {}", voice);
+    ipc::send(IpcEvent::SpeechRecognized { text: voice.clone() });
+
+    let lang = i18n::get_language();
+    let wake_phrases = config::get_wake_phrases(&lang);
+    if wake_phrases.iter().any(|wp| voice.contains(wp.as_str())) {
+        let mut remaining = voice.clone();
+        for wp in &wake_phrases {
+            remaining = remaining.replace(wp.as_str(), "");
+        }
+        let remaining = remaining.trim().to_string();
+        if remaining.is_empty() {
+            *first_recognition = false;
+            return PhraseOutcome::Reactivate;
+        }
+        info!("Wake word + command in one phrase: '{}'", remaining);
+        voice = remaining;
+    }
+    *first_recognition = false;
+
+    for tbr in config::get_phrases_to_remove(&lang) {
+        voice = voice.replace(tbr.as_str(), "");
+    }
+    let voice = voice.trim().to_string();
+    if voice.chars().count() < 3 {
+        debug!("Ignoring too short recognition: '{}'", voice);
+        return PhraseOutcome::Ignore;
+    }
+    PhraseOutcome::Executed(execute_command(&voice, rt))
+}
+
+// Voice recognition for command after wake word / hotkey.
+// Vosk режет речь на паузах, поэтому куски КОПЯТСЯ и исполняются одной фразой после
+// настоящей паузы ~1.4 с: длинная диктовка сценария не рвётся и не теряется.
 fn recognize_command(
     frame_buffer: &mut [i16],
     rt: &tokio::runtime::Runtime,
@@ -196,158 +278,109 @@ fn recognize_command(
         VadState::WaitingForVoice
     };
     let mut silence_frames: u32 = 0;
-    let mut start = SystemTime::now();
     let mut first_recognition = prefed_audio;
-    
-    // longer silence threshold for commands (user might pause to think)
-    // 5 seconds
-    let silence_threshold: u32 = ((5.0 * sample_rate as f32) / frame_length as f32) as u32;
-    
+    let mut pending = String::new();                 // накопленная фраза
+    let mut utter_start = SystemTime::now();         // начало фразы (потолок длины)
+    let mut last_activity = SystemTime::now();       // последний распознанный текст
+    let mut followups_left: u32 = 1;                 // после ответа — одно дослушивание, не бесконечно
+
+    let fps = sample_rate as f32 / frame_length as f32;
+    let end_frames = (1.4 * fps) as u32;             // пауза 1.4 с = фраза закончена
+    let wait_limit = std::time::Duration::from_secs(15); // ждать начала речи
+    let max_utterance = std::time::Duration::from_secs(90);
+
     loop {
         if crate::should_stop() {
             return;
         }
-        
+        // выключили микрофон прямо во время слушания — замолкаем
+        if crate::MUTED.load(std::sync::atomic::Ordering::Relaxed) {
+            info!("Mic muted during listening — stop listening.");
+            stt::reset_speech_recognizer();
+            return;
+        }
+
         recorder::read_microphone(frame_buffer);
         let processed = audio_processing::process(frame_buffer);
-        
+
         match vad_state {
             VadState::WaitingForVoice => {
                 audio_buffer.push(frame_buffer);
-                
                 if processed.is_voice {
-                    // flush buffer to STT
                     for buffered_frame in audio_buffer.drain_all() {
-                        stt::recognize(&buffered_frame, false);
+                        if let Some(seg) = stt::recognize(&buffered_frame, false) {
+                            append_text(&mut pending, &seg);
+                        }
+                    }
+                    if pending.is_empty() {
+                        utter_start = SystemTime::now();
                     }
                     vad_state = VadState::VoiceActive;
                     silence_frames = 0;
-                } else {
-                    silence_frames += 1;
-                    
-                    if silence_frames > silence_threshold {
-                        info!("Long silence detected, returning to wake word mode.");
-                        return;
-                    }
                 }
             }
-            
+
             VadState::VoiceActive => {
-                // feed to STT
-                if let Some(mut recognized_voice) = stt::recognize(frame_buffer, false) {
-                    info!("Recognized voice: {}", recognized_voice);
-                    
-                    ipc::send(IpcEvent::SpeechRecognized {
-                        text: recognized_voice.clone(),
-                    });
-                    
-                    recognized_voice = recognized_voice.to_lowercase();
-                    
-                    // check if wake word repeated (reactivate)
-                    let wake_phrases = config::get_wake_phrases(&i18n::get_language());
-                    let contains_wake = wake_phrases.iter().any(|wp| recognized_voice.contains(wp.as_str()));
-
-                    if contains_wake {
-                        // strip the wake word
-                        let mut remaining = recognized_voice.clone();
-                        for wp in &wake_phrases {
-                            remaining = remaining.replace(wp.as_str(), "");
-                        }
-                        let remaining = remaining.trim();
-
-                        if remaining.is_empty() {
-                            if first_recognition {
-                                // leftover wake word from dual-feed, just discard it
-                                info!("Discarding initial wake word from prefed audio");
-                                first_recognition = false;
-                                stt::reset_speech_recognizer();
-                                voices::play_reply();
-                                vad_state = VadState::WaitingForVoice;
-                                silence_frames = 0;
-                                start = SystemTime::now();
-                                audio_buffer.clear();
-                                continue;
-                            }
-
-                            // just wake word, no command - reactivate
-                            info!("Wake word repeated during chaining, reactivating...");
-                            voices::play_reply();
-                            stt::reset_speech_recognizer();
-                            ipc::send(IpcEvent::Listening);
-                            
-                            vad_state = VadState::WaitingForVoice;
-                            silence_frames = 0;
-                            start = SystemTime::now();
-                            audio_buffer.clear();
-                            continue;
-                        } else {
-                            // wake word + command in one phrase - execute the command part
-                            info!("Wake word + command during chaining: '{}'", remaining);
-                            recognized_voice = remaining.to_string();
-                            // fall through to command execution below
-                        }
-                    }
-
-                    first_recognition = false;
-                    
-                    // filter activation phrases
-                    // for tbr in config::ASSISTANT_PHRASES_TBR {
-                    //     recognized_voice = recognized_voice.replace(tbr.as_str(), "");
-                    // }
-                    for tbr in config::get_phrases_to_remove(&i18n::get_language()) {
-                        recognized_voice = recognized_voice.replace(tbr.as_str(), "");
-                    }
-
-                    recognized_voice = recognized_voice.trim().to_string();
-                    
-                    if recognized_voice.len() < 5 {
-                        debug!("Ignoring too short recognition: '{}'", recognized_voice);
-                        continue;
-                    }
-
-                    if recognized_voice.is_empty() {
-                        continue;
-                    }
-                    
-                    // execute command and check if we should chain
-                    let should_chain = execute_command(&recognized_voice, rt);
-                    
-                    if should_chain {
-                        // chain: reset and continue listening
-                        info!("Chaining enabled, continuing to listen...");
-                        stt::reset_speech_recognizer();
-                        vad_state = VadState::WaitingForVoice;
-                        silence_frames = 0;
-                        start = SystemTime::now();
-                        audio_buffer.clear();
-                        ipc::send(IpcEvent::Listening);
-                        continue;
-                    } else {
-                        // no chain: return to wake word
-                        info!("No chain, returning to wake word mode.");
-                        return;
-                    }
+                if let Some(seg) = stt::recognize(frame_buffer, false) {
+                    append_text(&mut pending, &seg); // кусок фразы — копим, не исполняем сразу
+                    last_activity = SystemTime::now();
                 }
-                
-                // track silence
                 if processed.is_voice {
                     silence_frames = 0;
                 } else {
                     silence_frames += 1;
-                    
-                    if silence_frames > silence_threshold {
-                        info!("Long silence detected, returning to wake word mode.");
-                        return;
+                }
+
+                let too_long = utter_start.elapsed().map(|e| e > max_utterance).unwrap_or(false);
+                if silence_frames >= end_frames || too_long {
+                    // фраза закончилась: дочитать хвост и исполнить ЦЕЛИКОМ
+                    if let Some(tail) = stt::finalize_speech() {
+                        append_text(&mut pending, &tail);
+                    }
+                    stt::reset_speech_recognizer();
+                    let phrase = std::mem::take(&mut pending);
+                    vad_state = VadState::WaitingForVoice;
+                    silence_frames = 0;
+                    audio_buffer.clear();
+                    if phrase.trim().is_empty() {
+                        continue; // шум без слов
+                    }
+                    last_activity = SystemTime::now();
+
+                    match handle_phrase(&phrase, &mut first_recognition, rt) {
+                        PhraseOutcome::Ignore => continue,
+                        PhraseOutcome::Reactivate => {
+                            info!("Wake word alone — listening for the command...");
+                            voices::play_reply();
+                            ipc::send(IpcEvent::Listening);
+                            followups_left = 1;
+                            continue;
+                        }
+                        PhraseOutcome::Executed(chain) => {
+                            drain_mic(frame_buffer); // эхо собственного ответа — не команда
+                            if chain && followups_left > 0 {
+                                followups_left -= 1;
+                                info!("Waiting for a follow-up question...");
+                                stt::reset_speech_recognizer();
+                                ipc::send(IpcEvent::Listening);
+                                last_activity = SystemTime::now();
+                                continue;
+                            }
+                            info!("Done, returning to wake word mode.");
+                            return;
+                        }
                     }
                 }
             }
         }
-        
-        // timeout
-        if let Ok(elapsed) = start.elapsed() {
-            if elapsed > config::CMS_WAIT_DELAY {
-                info!("Command timeout, returning to wake word mode.");
-                return;
+
+        // долго ничего не сказано (а не «долго говорит») — выходим
+        if pending.is_empty() {
+            if let Ok(idle) = last_activity.elapsed() {
+                if idle > wait_limit {
+                    info!("No speech for {}s, returning to wake word mode.", wait_limit.as_secs());
+                    return;
+                }
             }
         }
     }
@@ -425,24 +458,29 @@ fn try_switch_brain(text: &str) -> bool {
         return false;
     }
 
-    let target = if text.contains("gpt") || text.contains("гпт") || text.contains("джипити")
-        || text.contains("чат") || text.contains("chatgpt")
+    // два мозга: облако по API-ключу или локальная Ollama (подписка Claude убрана)
+    let target = if text.contains("локальн") || text.contains("олам") || text.contains("оллам")
+        || text.contains("ollama") || text.contains("офлайн") || text.contains("бесплатн")
+    {
+        Some("ollama")
+    } else if text.contains("облак") || text.contains("gpt") || text.contains("гпт")
+        || text.contains("джипити") || text.contains("chatgpt") || text.contains("апи")
     {
         Some("openai")
-    } else if text.contains("клод") || text.contains("claude") || text.contains("клауд") {
-        Some("claude")
-    } else if text.contains("авто") || text.contains("auto") {
-        Some("auto")
     } else {
         None
     };
 
     match target.and_then(jarvis_core::brain::set_backend) {
         Some(name) => {
-            let spoken = match name {
-                "openai" => "Переключаюсь на GPT, сэр.",
-                "claude" => "Переключаюсь на Клод, сэр.",
-                _ => "Автоматический режим включён, сэр.",
+            // сохранить выбор, чтобы его видела страница «Мозг» и он пережил перезапуск
+            if let Some(arc) = jarvis_core::DB.get() {
+                let _ = jarvis_core::SettingsManager::from_arc(arc.clone()).write("brain_backend", name);
+            }
+            let spoken = if name == "ollama" {
+                "Переключаюсь на локальный мозг, сэр."
+            } else {
+                "Переключаюсь на облачный мозг, сэр."
             };
             info!("Brain backend switched to: {}", name);
             ipc::send(IpcEvent::AssistantReply { text: spoken.to_string() });
@@ -456,6 +494,17 @@ fn try_switch_brain(text: &str) -> bool {
 
 // Execute command, returns true if chaining should continue
 fn execute_command(text: &str, rt: &tokio::runtime::Runtime) -> bool {
+    // МОЗГ-ПЕРВЫМ: любой запрос сначала уходит в API-роутер; мозг сам решает —
+    // ответить / поискать в сети / завести наблюдателя / объяснить новость, либо вернуть
+    // «команду программе», и тогда идём обычным путём ниже (команды/терминал/мозг).
+    if let Some(answer) = jarvis_core::terminal::route(text) {
+        info!("Router handled request → {}", answer);
+        ipc::send(IpcEvent::AssistantReply { text: answer.clone() });
+        jarvis_core::tts::speak(&answer);
+        ipc::send(IpcEvent::Idle);
+        return true; // окно дослушивания 15с
+    }
+
     let commands_list = match COMMANDS_LIST.get() {
         Some(c) => c,
         None => {
@@ -525,20 +574,21 @@ fn execute_command(text: &str, rt: &tokio::runtime::Runtime) -> bool {
             ipc::send(IpcEvent::AssistantReply { text: answer.clone() });
             jarvis_core::tts::speak(&answer); // обычный чёткий голос (как остальные ответы)
             ipc::send(IpcEvent::Idle);
-            return false;
+            return true;   // окно дослушивания: можно сразу спросить уточнение про новость
         }
 
-        info!("No local command matched for: '{}'. Asking Claude brain...", text);
+        info!("No local command matched for: '{}'. Asking the brain...", text);
 
-        // No local command matched -> hand the phrase to the Claude "brain".
-        // Runs the local `claude` CLI (subscription auth). Blocking is fine here:
-        // we are on the app worker thread and the assistant is "thinking".
+        // Ни одна локальная команда не подошла -> спросить мозг (облако по ключу или Ollama).
+        // Блокировка здесь допустима: это рабочий поток, ассистент «думает».
         match jarvis_core::brain::ask(text) {
             Ok(answer) => {
                 info!("Brain reply: {}", answer);
                 ipc::send(IpcEvent::AssistantReply { text: answer.clone() });
                 // Speak the reply aloud (best-effort; blocks until finished).
                 jarvis_core::tts::speak(&answer);
+                ipc::send(IpcEvent::Idle);
+                return true;   // окно дослушивания 15с: можно задать уточняющий вопрос
             }
             Err(e) => {
                 warn!("Brain unavailable ({}). Falling back to 'not found'.", e);

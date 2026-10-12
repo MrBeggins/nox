@@ -68,6 +68,12 @@ fn key_down(vk: i32) -> bool {
 #[cfg(target_os = "windows")]
 fn hotkey_is_down(combo: &str) -> bool {
     use winapi::um::winuser::*;
+    // Произвольная клавиша/кнопка мыши, заданная захватом в настройках: "vk:<код>"
+    if let Some(n) = combo.strip_prefix("vk:") {
+        if let Ok(vk) = n.trim().parse::<i32>() {
+            return key_down(vk);
+        }
+    }
     match combo {
         "ctrl_alt_j"     => key_down(VK_CONTROL) && key_down(VK_MENU) && key_down('J' as i32),
         "ctrl_alt_space" => key_down(VK_CONTROL) && key_down(VK_MENU) && key_down(VK_SPACE),
@@ -101,6 +107,11 @@ fn main() -> Result<(), String> {
     // set global DB (for core modules that read settings at init time)
     DB.set(settings.arc().clone())
             .expect("DB already initialized");
+
+    // восстановить состояние Пульса: выключенный микрофон / «не беспокоить» переживают перезапуск
+    MUTED.store(settings.lock().mic_muted, Ordering::SeqCst);
+    DND.store(settings.lock().dnd, Ordering::SeqCst);
+    info!("Pulse state: mic_muted={} dnd={}", settings.lock().mic_muted, settings.lock().dnd);
 
     // init voices
     let voice_id = settings.lock().voice.clone();
@@ -195,6 +206,8 @@ fn main() -> Result<(), String> {
             // Новости/алерты — быстрым дикторским темпом (динамическая скорость),
             // блокирует до конца проигрывания -> без наложений.
             jarvis_core::tts::speak_reply(&text);
+            // несколько новостей разом — читаем по очереди, не торопясь: короткая пауза между ними
+            std::thread::sleep(std::time::Duration::from_millis(600));
         }
     });
 
@@ -211,13 +224,22 @@ fn main() -> Result<(), String> {
             IpcAction::ReloadSettings => {
                 info!("Reloading settings from disk (live apply)");
                 jarvis_core::db::reload_global();
-                if let Some(b) = jarvis_core::DB.get().and_then(|db| db.read().get("brain_backend")) {
-                    jarvis_core::brain::set_backend(&b);
+                info!("Brain: {}", jarvis_core::brain::reload_backend());
+                if let Some(db) = jarvis_core::DB.get() {
+                    let s = db.read();
+                    MUTED.store(s.mic_muted, Ordering::SeqCst);
+                    DND.store(s.dnd, Ordering::SeqCst);
                 }
+            }
+            IpcAction::AbortSpeech => {
+                info!("Received abort-speech (stop button)");
+                jarvis_core::tts::request_stop();
+                jarvis_core::commands::request_cancel();
             }
             IpcAction::SetMuted { muted } => {
                 info!("Mic mute set to: {}", muted);
                 MUTED.store(muted, Ordering::SeqCst);
+                persist_flag("mic_muted", muted);
             }
             IpcAction::TextCommand { text } => {
                 info!("Received text command: {}", text);
@@ -231,6 +253,7 @@ fn main() -> Result<(), String> {
             IpcAction::SetDnd { on } => {
                 info!("Do-not-disturb set to: {}", on);
                 DND.store(on, Ordering::SeqCst);
+                persist_flag("dnd", on);
             }
             IpcAction::Ping => {
                 // handled internally by server
@@ -283,4 +306,14 @@ fn main() -> Result<(), String> {
 
 pub fn should_stop() -> bool {
     SHOULD_STOP.load(Ordering::SeqCst)
+}
+
+/// Сохранить флаг Пульса (микрофон/DND) в app.db, чтобы он пережил перезапуск.
+fn persist_flag(key: &str, on: bool) {
+    if let Some(arc) = DB.get() {
+        let mgr = jarvis_core::SettingsManager::from_arc(arc.clone());
+        if let Err(e) = mgr.write(key, if on { "true" } else { "false" }) {
+            warn!("Failed to persist {}: {}", key, e);
+        }
+    }
 }

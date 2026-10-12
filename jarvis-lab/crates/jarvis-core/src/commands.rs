@@ -3,8 +3,43 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use std::time::Duration;
 use std::process::{Child, Command};
+use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use seqdiff::ratio;
+
+// Принудительная отмена запущенных внешних команд.
+static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+static RUNNING_CHILDREN: OnceLock<Mutex<Vec<Child>>> = OnceLock::new();
+
+fn running_children() -> &'static Mutex<Vec<Child>> {
+    RUNNING_CHILDREN.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Прерывает озвучку и внешние процессы текущей команды.
+pub fn request_cancel() {
+    CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+    if let Ok(mut children) = running_children().lock() {
+        for child in children.iter_mut() {
+            let _ = child.kill();
+        }
+        children.clear();
+    }
+}
+
+fn clear_cancel() {
+    CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+fn spawn_tracked(mut child: Child) -> std::io::Result<()> {
+    if CANCEL_REQUESTED.load(Ordering::SeqCst) {
+        let _ = child.kill();
+        return Ok(());
+    }
+    let mut children = running_children().lock().map_err(|_| std::io::Error::other("command lock poisoned"))?;
+    children.push(child);
+    Ok(())
+}
 
 mod structs;
 pub use structs::*;
@@ -275,6 +310,7 @@ pub fn execute_cli(cmd: &str, args: &[String]) -> std::io::Result<Child> {
 }
 
 pub fn execute_command(cmd_path: &PathBuf, cmd_config: &JCommand, phrase: Option<&str>, slots: Option<&HashMap<String, SlotValue>>) -> Result<bool, String> {
+    clear_cancel();
     // execute command by the type
     match cmd_config.cmd_type.as_str() {
 
@@ -300,6 +336,7 @@ pub fn execute_command(cmd_path: &PathBuf, cmd_config: &JCommand, phrase: Option
             };
 
             execute_exe(exe_path.to_str().unwrap(), &cmd_config.exe_args)
+                .and_then(|child| { spawn_tracked(child)?; Ok(()) })
                 .map(|_| true)
                 .map_err(|e| format!("AHK process spawn error: {}", e))
         }
@@ -308,6 +345,7 @@ pub fn execute_command(cmd_path: &PathBuf, cmd_config: &JCommand, phrase: Option
         // @TODO: Consider security restrictions
         "cli" => {
             execute_cli(&cmd_config.cli_cmd, &cmd_config.cli_args)
+                .and_then(|child| { spawn_tracked(child)?; Ok(()) })
                 .map(|_| true)
                 .map_err(|e| format!("CLI command error: {}", e))
         }

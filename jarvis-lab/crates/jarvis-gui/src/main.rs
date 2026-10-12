@@ -133,6 +133,28 @@ fn main() {
             tauri_commands::scn_show_all,
             tauri_commands::scn_test,
             tauri_commands::scn_brain,
+            tauri_commands::brain_models,
+            tauri_commands::terminal_show,
+
+            // Наблюдатели «мультимозг»
+            tauri_commands::watch_list,
+            tauri_commands::watch_add,
+            tauri_commands::watch_voice,
+            tauri_commands::watch_parse,
+            tauri_commands::watch_del,
+            tauri_commands::watch_toggle,
+            tauri_commands::watch_save,
+            tauri_commands::watch_scan,
+            tauri_commands::watch_layout,
+            tauri_commands::watch_show,
+            tauri_commands::watch_dry,
+            tauri_commands::cscalp_layout,
+
+            // Выбор голоса (движок + диктор)
+            tauri_commands::voice_list,
+            tauri_commands::voice_get,
+            tauri_commands::voice_set,
+            tauri_commands::voice_test,
 
             // Russian Magellan (order flow)
             tauri_commands::magellan_filter_get,
@@ -156,6 +178,9 @@ fn main() {
             tauri_commands::tg_creds_set,
             tauri_commands::tg_mon,
             tauri_commands::tg_login,
+            tauri_commands::tg_public_get,
+            tauri_commands::tg_public_add,
+            tauri_commands::tg_public_remove,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

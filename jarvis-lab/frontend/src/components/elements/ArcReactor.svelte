@@ -1,5 +1,10 @@
 <script lang="ts">
-    import { jarvisState } from "@/stores"
+    import { jarvisState, abortSpeech } from "@/stores"
+
+    function emergencyStop(event: MouseEvent) {
+        event.stopPropagation()
+        abortSpeech()
+    }
 
     $: stateClass = {
         'disconnected': 'disconnected',
@@ -35,6 +40,7 @@
     <div class="core-wrapper circle abs-center"></div>
     <div class="core-outer circle abs-center"></div>
     <div class="core-inner circle abs-center"></div>
+    <button class="emergency-stop" on:click={emergencyStop} title="Принудительно остановить команду и озвучку" aria-label="Стоп">STOP</button>
     <div class="coil-container">
         {#each Array(8) as _, i}
             <div class="coil coil-{i + 1}"></div>
@@ -43,6 +49,25 @@
 </div>
 
 <style lang="scss" global>
+    .emergency-stop {
+        position: absolute;
+        z-index: 20;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: 58px;
+        height: 58px;
+        border-radius: 50%;
+        border: 2px solid rgba(255, 90, 90, .9);
+        background: rgba(45, 8, 12, .82);
+        color: #ff7777;
+        font: 700 12px/1 sans-serif;
+        letter-spacing: 1px;
+        cursor: pointer;
+        box-shadow: 0 0 14px rgba(255, 60, 70, .45);
+    }
+    .emergency-stop:hover { background: rgba(120, 15, 20, .95); color: #fff; }
+
     // [ ARC REACTOR VARIABLES ]
     $arc-radius: 133px;
     $arc-container-size: 195%;

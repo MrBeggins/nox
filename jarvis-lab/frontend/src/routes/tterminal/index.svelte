@@ -7,6 +7,10 @@
     let url = ""
     let enabled = false
     let token = ""
+    // голосовое исполнение заявок (Нокс сам жмёт Купить/Продать); проверяет terminal_reader перед нажатием
+    let execEnabled = false
+    let maxLots = "10"
+    let maxRub = "50000"
     let toast = ""
     function flash(m: string) { toast = m; setTimeout(() => (toast = ""), 1600) }
 
@@ -15,7 +19,23 @@
             url = (await invoke<string>("db_read", { key: "tterminal_url" })) || "https://www.tbank.ru/invest/terminal/"
             enabled = (await invoke<string>("db_read", { key: "tterminal_enabled" })) === "true"
             token = await invoke<string>("db_read", { key: "invest_token" })
+            execEnabled = (await invoke<string>("db_read", { key: "tterminal_exec_enabled" })) === "true"
+            maxLots = (await invoke<string>("db_read", { key: "tterminal_exec_max_lots" })) || "10"
+            maxRub = (await invoke<string>("db_read", { key: "tterminal_exec_max_rub" })) || "50000"
         } catch (e) { console.error(e) }
+    }
+
+    async function toggleExec() {
+        execEnabled = !execEnabled
+        await invoke("db_write", { key: "tterminal_exec_enabled", val: String(execEnabled) })
+        flash(execEnabled ? "Исполнение голосом включено" : "Исполнение голосом выключено")
+    }
+    async function saveLimits() {
+        const lots = String(maxLots).replace(/\s/g, ""), rub = String(maxRub).replace(/\s/g, "")
+        if (!/^\d+$/.test(lots) || !/^\d+$/.test(rub)) { flash("Лимиты — целые числа (0 = без лимита)"); return }
+        const ok = (await invoke<boolean>("db_write", { key: "tterminal_exec_max_lots", val: lots }))
+            && (await invoke<boolean>("db_write", { key: "tterminal_exec_max_rub", val: rub }))
+        flash(ok ? "Лимиты сохранены" : "Не удалось сохранить лимиты")
     }
     onMount(load)
 
@@ -33,8 +53,12 @@
         await invoke("db_write", { key: "tterminal_url", val: url })
         flash("Адрес сохранён")
     }
+    // терминал живёт в окне Нокса (браузер с портом отладки) — показываем его, а не открываем новую вкладку
     async function open() {
-        try { await invoke("open_url", { url }) } catch (e) { flash("Не удалось открыть: " + e) }
+        try {
+            const r = JSON.parse(await invoke<string>("terminal_show"))
+            flash(r.text || (r.ok ? "Терминал открыт" : "Не удалось показать терминал"))
+        } catch (e) { flash("Ридер терминала не отвечает") }
     }
 </script>
 
@@ -74,13 +98,43 @@
 
     <HDivider />
 
+    <h3 style="margin:0 0 0.3rem;color:#cdeff0;font-size:0.95rem;">Исполнение заявок голосом</h3>
+    <div class="row" class:danger={execEnabled}>
+        <div class="row-info">
+            <div class="row-title">Нокс сам нажимает «Купить / Продать»</div>
+            <div class="row-desc">Голос («выставь заявку…», «продай всё …») и <b>наблюдатели</b> (кнопки веток при выходе новости) отправляют заявки сами — <b>без подтверждения</b>. Выключено — голос только заполняет виджет, наблюдатель только озвучивает, что нажать; кнопку жмёте вы.</div>
+        </div>
+        <button class="switch" class:on={execEnabled} on:click={toggleExec} aria-label="исполнение голосом">
+            <span class="knob"></span>
+        </button>
+    </div>
+    <div class="limits">
+        <label>Максимум лотов в одной заявке<InfoDot text="Если голосовая заявка больше — Нокс заполнит виджет, но кнопку не нажмёт. 0 = без лимита." />
+            <input bind:value={maxLots} inputmode="numeric" placeholder="10" />
+        </label>
+        <label>Максимальная сумма заявки, ₽<InfoDot text="Для рыночной заявки сумма считается по последней цене. Если больше — заявка не отправляется. 0 = без лимита." />
+            <input bind:value={maxRub} inputmode="numeric" placeholder="50000" />
+        </label>
+    </div>
+    <div class="actions">
+        <button class="btn" on:click={saveLimits}>Сохранить лимиты</button>
+    </div>
+    <p class="hint">Каждая голосовая заявка (что сказано, что распознано, ушла или нет и почему) пишется в журнал <code>C:\jarvis-voice\order_journal.jsonl</code>.</p>
+
+    <HDivider />
+
     <div class="boundary">
         <div class="boundary-title">🔒 Граница безопасности</div>
         <ul>
-            <li>✅ Джарвис может <b>смотреть</b> портфель и котировки, <b>озвучивать</b> их, <b>готовить</b> заявки и предупреждать по цене.</li>
-            <li>⛔ Джарвис <b>не исполняет</b> сделки и <b>не переводит</b> деньги. Финальную кнопку «Купить / Продать / Подтвердить» нажимаешь <b>только ты</b>.</li>
+            <li>✅ Нокс может <b>смотреть</b> портфель и котировки, <b>озвучивать</b> их, <b>готовить</b> заявки и предупреждать по цене.</li>
+            {#if execEnabled}
+                <li>⚠️ Включено <b>исполнение голосом</b>: Нокс сам жмёт «Купить / Продать» в пределах лимитов выше. Ослышка = реальная сделка — держите лимиты небольшими.</li>
+            {:else}
+                <li>⛔ Нокс <b>не исполняет</b> сделки: финальную кнопку «Купить / Продать» нажимаете <b>вы</b>.</li>
+            {/if}
+            <li>⛔ Нокс <b>не переводит</b> деньги.</li>
         </ul>
-        <p class="hint">Это защищает от необратимых ошибок (ослышка, сбой, смена интерфейса). Для торговли «пока тебя нет» используй условные заявки самого брокера.</p>
+        <p class="hint">Для торговли «пока тебя нет» надёжнее условные заявки самого брокера.</p>
     </div>
 </div>
 
@@ -114,6 +168,10 @@
     .knob { position: absolute; top: 2px; left: 2px; width: 22px; height: 22px;
         background: #eafeff; border-radius: 50%; transition: transform 0.2s ease; }
     .switch.on .knob { transform: translateX(22px); background: #52fefe; }
+
+    .row.danger { border-color: rgba(255,120,90,0.55); background: rgba(60,22,18,0.45); }
+    .limits { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+    code { font-size: 0.75rem; color: #cdeff0; }
 
     .boundary { background: rgba(15,26,30,0.55); border: 1px solid rgba(82,254,254,0.14);
         border-radius: 12px; padding: 0.9rem 1rem; }

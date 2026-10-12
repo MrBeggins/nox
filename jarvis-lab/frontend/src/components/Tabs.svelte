@@ -16,7 +16,8 @@
         { path: "/",          key: "tab-home",      fallback: "Главная",    icon: "◉" },
         { path: "/commands",  key: "tab-commands",  fallback: "Команды",    icon: "⌘" },
         { path: "/modes",     key: "tab-modes",     fallback: "Режимы",     icon: "⚙" },
-        { path: "/models",    key: "tab-models",    fallback: "ИИ-модели",  icon: "✦" },
+        { path: "/models",    key: "tab-models",    fallback: "Мозг",       icon: "✦" },
+        { path: "/watchers",  key: "tab-watchers",  fallback: "Наблюдатели", icon: "⊙" },
         { path: "/tterminal", key: "tab-tterminal", fallback: "Т-Терминал", icon: "₮" },
         { path: "/settings",  key: "tab-settings",  fallback: "Настройки",  icon: "⚙" },
     ]

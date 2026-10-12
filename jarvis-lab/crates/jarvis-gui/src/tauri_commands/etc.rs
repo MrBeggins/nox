@@ -6,18 +6,8 @@ use tauri::Manager;
 /// скрытым процессом, чтобы довести дело до конца даже после закрытия GUI.
 #[tauri::command]
 pub fn stop_nox() -> Result<(), String> {
-    let script = "\
-foreach($p in 8130,8123,8124,8126,8127,9712){ $c=Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if($c){ Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue } }; \
-taskkill /F /IM jarvis-app.exe; Start-Sleep -Seconds 1; taskkill /F /IM jarvis-gui.exe";
-    let mut cmd = std::process::Command::new("powershell");
-    cmd.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", script]);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    cmd.spawn().map_err(|e| e.to_string())?;
-    Ok(())
+    // общая реализация с трея: метка «остановлен» + watchdog + все сервисы + движок + GUI
+    jarvis_core::shutdown::spawn_full_stop()
 }
 
 /// Разовый вход в Telegram: открыть ВИДИМОЕ окно консоли для ввода телефона и кода

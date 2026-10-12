@@ -90,9 +90,92 @@ pub fn scn_test(id: String, value: String) -> Result<String, String> {
     get("/scn_test", &[("id", &id), ("value", &value)])
 }
 
+/// Показать терминал в окне Нокса (без новых вкладок; если терминала нет — ридер откроет один).
+#[tauri::command]
+pub fn terminal_show() -> Result<String, String> { get_long("/terminal_show", &[], 30) }
+
+/// Страница «Мозг»: модели Ollama на этом ПК и каталог облака (по ключу).
+#[tauri::command]
+pub fn brain_models() -> Result<String, String> { get_long("/brain_models", &[], 20) }
+
 #[tauri::command]
 pub fn scn_brain(brain: String, claude_key: String, openai_key: String) -> Result<String, String> {
     get("/scn_brain", &[("brain", &brain), ("claude_key", &claude_key), ("openai_key", &openai_key)])
+}
+
+// ---- Наблюдатели «мультимозг» (:8126) ----
+#[tauri::command]
+pub fn watch_list() -> Result<String, String> { get("/watch_list", &[]) }
+
+#[tauri::command]
+pub fn watch_add(name: String, keywords: String, source: String, brain: String,
+                 scenario_id: String, until: String, once: i32) -> Result<String, String> {
+    get("/watch_add", &[("name", &name), ("keywords", &keywords), ("source", &source),
+                        ("brain", &brain), ("scenario_id", &scenario_id), ("until", &until),
+                        ("once", &once.to_string())])
+}
+
+#[tauri::command]
+pub fn watch_voice(text: String) -> Result<String, String> { get("/watch_voice", &[("text", &text)]) }
+
+/// Разобрать описание наблюдения для формы (без сохранения) — мозг думает несколько секунд.
+#[tauri::command]
+pub fn watch_parse(text: String) -> Result<String, String> { get_long("/watch_parse", &[("text", &text)], 40) }
+
+#[tauri::command]
+pub fn watch_del(id: String) -> Result<String, String> { get("/watch_del", &[("id", &id)]) }
+
+#[tauri::command]
+pub fn watch_toggle(id: String) -> Result<String, String> { get("/watch_toggle", &[("id", &id)]) }
+
+// Наблюдатели с ветками: операции в терминале идут дольше 8с (раскладка виджетов — до минут)
+fn get_long(path: &str, query: &[(&str, &str)], secs: u64) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(secs))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = reqwest::Url::parse_with_params(&format!("{}{}", READER, path), query)
+        .map_err(|e| e.to_string())?;
+    client.get(url).send().map_err(|e| format!("reader offline: {e}"))?
+        .text().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn watch_save(json_data: String) -> Result<String, String> { get("/watch_save", &[("json_data", &json_data)]) }
+
+#[tauri::command]
+pub fn watch_scan(tab: String) -> Result<String, String> { get_long("/watch_scan", &[("tab", &tab)], 30) }
+
+#[tauri::command]
+pub fn watch_layout(id: String) -> Result<String, String> { get_long("/watch_layout", &[("id", &id)], 200) }
+
+#[tauri::command]
+pub fn watch_show(id: String) -> Result<String, String> { get_long("/watch_show", &[("id", &id)], 30) }
+
+#[tauri::command]
+pub fn watch_dry(id: String, value: String) -> Result<String, String> {
+    get_long("/watch_dry", &[("id", &id), ("value", &value)], 40)
+}
+
+// Стаканы CScalp (проп без API) для редактора веток: скан окон CScalp — до ~5 с
+#[tauri::command]
+pub fn cscalp_layout() -> Result<String, String> { get_long("/cscalp_layout", &[], 40) }
+
+// ---- Выбор голоса: движок (Silero/XTTS) + диктор (:8126) ----
+#[tauri::command]
+pub fn voice_list() -> Result<String, String> { get("/voice_list", &[]) }
+
+#[tauri::command]
+pub fn voice_get() -> Result<String, String> { get("/voice_get", &[]) }
+
+#[tauri::command]
+pub fn voice_set(engine: String, speaker: String) -> Result<String, String> {
+    get("/voice_set", &[("engine", &engine), ("speaker", &speaker)])
+}
+
+#[tauri::command]
+pub fn voice_test(engine: String, speaker: String) -> Result<String, String> {
+    get("/voice_test", &[("engine", &engine), ("speaker", &speaker)])
 }
 
 // ---- Russian Magellan PRO (order flow, :8127) ----
@@ -200,3 +283,13 @@ pub fn tg_creds_set(api_id: String, api_hash: String) -> Result<String, String> 
 
 #[tauri::command]
 pub fn tg_mon(on: i32) -> Result<String, String> { gget("/mon", &[("on", &on.to_string())]) }
+
+// ---- публичные каналы без входа (t.me/s/<имя>) ----
+#[tauri::command]
+pub fn tg_public_get() -> Result<String, String> { gget("/public_get", &[]) }
+
+#[tauri::command]
+pub fn tg_public_add(value: String) -> Result<String, String> { gget("/public_add", &[("q", &value)]) }
+
+#[tauri::command]
+pub fn tg_public_remove(value: String) -> Result<String, String> { gget("/public_remove", &[("q", &value)]) }

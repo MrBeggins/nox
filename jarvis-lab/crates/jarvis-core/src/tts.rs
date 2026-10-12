@@ -12,8 +12,43 @@
 //!   JARVIS_TTS_RATE  WinRT speaking rate 0.5..6.0 (default: natural, ~1.0)
 
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+
+/// Флаг принудительной остановки текущей озвучки (кнопка «Стоп» на пульсе).
+static STOP: AtomicBool = AtomicBool::new(false);
+
+/// Говорим строго по одной фразе: новости, ответы на команды и отчёты наблюдателей идут из разных
+/// потоков. Без замка они накладывались (два голоса сразу) и перезаписывали общий временный файл
+/// текста друг друга — отсюда «глюки» и чужой текст, когда несколько новостей выходят разом.
+static SPEAK_LOCK: parking_lot::Mutex<()> = parking_lot::const_mutex(());
+
+/// Прервать текущую озвучку: убивает процесс воспроизведения и пропускает
+/// оставшиеся предложения. Сбрасывается в начале следующей фразы.
+pub fn request_stop() {
+    STOP.store(true, Ordering::SeqCst);
+}
+
+/// Запустить процесс воспроизведения так, чтобы его можно было прервать флагом STOP.
+/// true — завершился успешно; false — ошибка или прерван.
+fn run_killable(mut cmd: Command) -> bool {
+    match cmd.spawn() {
+        Ok(mut child) => loop {
+            if STOP.load(Ordering::SeqCst) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => return status.success(),
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(40)),
+                Err(_) => return false,
+            }
+        },
+        Err(_) => false,
+    }
+}
 /// Не создавать окно консоли при запуске powershell (иначе из GUI-процесса мелькает cmd).
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -60,7 +95,7 @@ fn speak_f5(txt_path: &std::path::Path, tmp: &std::path::Path, nfe: Option<u32>,
     }
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    matches!(cmd.status(), Ok(s) if s.success())
+    run_killable(cmd)
 }
 
 fn enabled() -> bool {
@@ -185,8 +220,11 @@ pub fn speak_nfe(text: &str, nfe: Option<u32>, speed: Option<f32>) {
     if text.is_empty() {
         return;
     }
+    let _turn = SPEAK_LOCK.lock();          // дождаться, пока договорит предыдущая фраза
+    STOP.store(false, Ordering::SeqCst);   // новая фраза — снять прошлый «стоп»
     if text.chars().count() > STREAM_THRESHOLD {
         for sent in split_sentences(text) {
+            if STOP.load(Ordering::SeqCst) { break; }   // прервали — не читаем остаток
             speak_piece(&sent, nfe, speed);
         }
         return;
@@ -246,13 +284,7 @@ fn speak_piece(text: &str, nfe: Option<u32>, speed: Option<f32>) {
         .stderr(Stdio::null());
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    let status = cmd.status();
-
-    match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => warn!("TTS: powershell exited with status {}", s),
-        Err(e) => error!("TTS: failed to launch powershell: {}", e),
-    }
+    let _ = run_killable(cmd);   // прерывается кнопкой «Стоп»
 
     let _ = std::fs::remove_file(&txt_path);
 }

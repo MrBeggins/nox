@@ -25,14 +25,10 @@ fn truthy(v: &str) -> bool {
 }
 
 pub fn is_enabled() -> bool {
-    // env wins; otherwise the persisted GUI toggle; default off.
+    // ОТКЛЮЧЕНО: зрение работало только через подписку Claude (CLI), а подписка из Нокса убрана —
+    // мозг теперь только облако по API-ключу или Ollama. Включается лишь явно через JARVIS_VISION=1.
     if let Ok(v) = std::env::var("JARVIS_VISION") {
         return truthy(&v);
-    }
-    if let Some(db) = crate::DB.get() {
-        if let Some(v) = db.read().get("vision_enabled") {
-            return v == "true";
-        }
     }
     false
 }
