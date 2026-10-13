@@ -14,7 +14,8 @@
         until: string, once: boolean, enabled: boolean, fired_day?: string,
         tab?: string, event?: string, branches?: Branch[], last_result?: string,
         // решение по ставке ЦБ/ФРС: разбор правилами, ветки по изменению в б.п.
-        kind?: string, bank?: string, date?: string, from?: string, rate_now?: number | null
+        kind?: string, bank?: string, date?: string, from?: string, rate_now?: number | null,
+        quiet?: number, strict?: boolean   // режим тишины за N мин; только официальная формулировка
     }
     type Widget = { ticker: string, n: number, label: string }
 
@@ -57,6 +58,7 @@
                 ed.tab = r.tab || ed.tab
                 if (r.kind === "rate") {
                     ed.kind = "rate"; ed.bank = r.bank || ed.bank; ed.date = r.date || ""; ed.from = r.from || ""
+                    ed.quiet = 5; ed.strict = true
                 }
                 if ((r.branches || []).length) ed.branches = r.branches
                 const nb = (r.branches || []).length
@@ -71,10 +73,32 @@
     function blank() {
         return { id: "", name: "", keywords: "", source: "all", brain: "", scenario_id: "", until: "",
                  once: true, tab: "", event: "", branches: [] as Branch[],
-                 kind: "", bank: "cbr", date: "", from: "", rate_now: "" as any }
+                 kind: "", bank: "cbr", date: "", from: "", rate_now: "" as any, quiet: 5, strict: true }
     }
-    const BANKS = [{ v: "cbr", l: "ЦБ РФ (решение в 13:30 МСК)", t: "13:30:00" },
-                   { v: "fed", l: "ФРС (заявление в 21:00 МСК)", t: "21:00:00" }]
+    const BANKS = [{ v: "cbr", l: "ЦБ РФ — ключевая ставка (13:30 МСК)", t: "13:30:00" },
+                   { v: "fed", l: "ФРС — ставка (21:00 МСК летом, 22:00 зимой)", t: "21:00:00 / 22:00:00 зимой" },
+                   { v: "minfin", l: "Минфин — покупка/продажа валюты (3-й рабочий день, 12:00)", t: "12:00:00" }]
+    const BANK_SHORT: Record<string, string> = { cbr: "ЦБ РФ", fed: "ФРС", minfin: "Минфин" }
+    // Минфин: ветки по объёму в день (млрд ₽; покупка +, продажа −, пауза 0)
+    function fxBranches() {
+        ed.branches = [...ed.branches,
+            { type: "gt", min: 0, max: null, orders: [] },
+            { type: "range", min: 0, max: 0, orders: [] },
+            { type: "lt", min: null, max: 0, orders: [] }]
+    }
+    function fxCondText(b: Branch) {
+        const f = (v: any) => (v === null || v === undefined || v === "" ? "?" : Number(v))
+        const r = (v: number) => String(Math.abs(v)).replace(".", ",")
+        if (b.type === "range" && f(b.min) === 0 && f(b.max) === 0) return "пауза (без операций)"
+        if (b.type === "gt" && f(b.min) === 0) return "любые покупки"
+        if (b.type === "lt" && f(b.max) === 0) return "любые продажи"
+        if ((b.type === "gt" || b.type === "ge") && (f(b.min) as number) > 0) return `покупки ${b.type === "gt" ? "больше" : "от"} ${r(f(b.min) as number)} млрд ₽/день`
+        if ((b.type === "lt" || b.type === "le") && (f(b.max) as number) < 0) return `продажи ${b.type === "lt" ? "больше" : "от"} ${r(f(b.max) as number)} млрд ₽/день`
+        return condText(b) + " млрд ₽/день"
+    }
+    function condFor(w: { kind?: string, bank?: string }, b: Branch) {
+        return w.kind !== "rate" ? condText(b) : w.bank === "minfin" ? fxCondText(b) : rateCondText(b)
+    }
     // три ветки разом: снижение / сохранение / повышение
     function rateBranches() {
         ed.branches = [...ed.branches,
@@ -185,7 +209,7 @@
                scenario_id: w.scenario_id || "", until: w.until || "", once: w.once, tab: w.tab || "",
                event: w.event || "", branches: JSON.parse(JSON.stringify(w.branches || [])),
                kind: w.kind || "", bank: w.bank || "cbr", date: w.date || "", from: w.from || "",
-               rate_now: (w.rate_now ?? "") as any }
+               rate_now: (w.rate_now ?? "") as any, quiet: w.quiet ?? 5, strict: w.strict !== false }
         scanned = []
         window.scrollTo({ top: 0, behavior: "smooth" })
     }
@@ -222,18 +246,18 @@
         <button class="btn" on:click={doBrief} disabled={parsing || !brief.trim()}>{parsing ? "Разбираю…" : "Разобрать"}</button>
     </div>
     <div class="grid">
-        <label>Тип<InfoDot text="«Решение по ставке» — для ЦБ РФ и ФРС: заголовок разбирается правилами без мозга (~0,1 мс, проверено на официальных формулировках cbr.ru и federalreserve.gov), ветки — по изменению ставки в б.п. Новости до заданного времени не принимаются: анонсы и прогнозы не сработают." />
+        <label>Тип<InfoDot text="«Новость по времени» — ставка ЦБ РФ, ставка ФРС, валютные операции Минфина: текст разбирается правилами без мозга (~0,1 мс, проверено на официальных формулировках cbr.ru, federalreserve.gov, minfin.gov.ru). Новости до заданного времени не принимаются; за N минут до него — режим тишины." />
             <select bind:value={ed.kind}>
                 <option value="">Новость: слова / число</option>
-                <option value="rate">Решение по ставке ЦБ / ФРС</option>
+                <option value="rate">Новость по времени: ставка ЦБ / ФРС, Минфин</option>
             </select>
         </label>
         <label>Название<InfoDot text="Например «Новатэк · дивиденды». Если вкладка не указана — так же назовётся вкладка терминала." />
             <input bind:value={ed.name} placeholder={ed.kind === "rate" ? "ЦБ · ставка 23.10" : "Новатэк · дивиденды"} />
         </label>
         {#if ed.kind === "rate"}
-            <label>Банк
-                <select bind:value={ed.bank} on:change={() => { ed.from = "" }}>
+            <label>Источник
+                <select bind:value={ed.bank} on:change={() => { ed.from = ""; ed.branches = [] }}>
                     {#each BANKS as b}<option value={b.v}>{b.l}</option>{/each}
                 </select>
             </label>
@@ -243,8 +267,16 @@
             <label>Принимать новости с (МСК)<InfoDot text="Раньше этого времени — ни анонсы, ни прогнозы, ни даже похожий заголовок не сработают. С −5 с до +3 мин от него Нокс читает ленту в 5 раз чаще (0,1 с)." />
                 <input bind:value={ed.from} placeholder={(BANKS.find((b) => b.v === ed.bank) || BANKS[0]).t} />
             </label>
+            {#if ed.bank !== "minfin"}
             <label>Текущая ставка, %<InfoDot text="Нужна, только если в заголовке нет «на N б.п.» (например «ЦБ повысил ставку до 15%»): тогда изменение = новая − текущая. Для ФРС — верхняя граница диапазона." />
                 <input bind:value={ed.rate_now} placeholder={ed.bank === "fed" ? "4,00" : "14,00"} />
+            </label>
+            {/if}
+            <label>Режим тишины за, мин<InfoDot text="За столько минут до времени выхода Нокс перестаёт читать новости, корпсобытия, календарь, уведомления о ПК и Магеллан — ждёт только эту новость. Снимается, когда наблюдатель сработал, или через 15 минут после времени, если решения так и не было. 0 — без тишины." />
+                <input type="number" min="0" max="60" bind:value={ed.quiet} />
+            </label>
+            <label class="chk"><input type="checkbox" bind:checked={ed.strict} /> Только официальная формулировка
+                <InfoDot text="Срабатывать только на текст самого регулятора: «Банк России принял решение…», «The Committee decided to…» / «ФРС приняла решение…», «О нефтегазовых доходах и проведении операций…» (Минфин). Пересказы агентств («ЦБ РФ СНИЗИЛ…») пропускаются. Если выключить — сработает и на пересказ." />
             </label>
         {:else}
         <label>Что ловить (ключевые слова)<InfoDot text="Срабатывает, когда в новости есть ВСЕ слова (склонения учитываются). Пример: «дивиденд новатэк»." />
@@ -273,12 +305,14 @@
             <div class="branch" style="border-color:{COLORS[i % COLORS.length]}">
                 <div class="bhead">
                     <span class="bname" style="background:{COLORS[i % COLORS.length]}">Ветка {i + 1}</span>
-                    <span class="lbl" title={ed.kind === "rate" ? "Изменение ставки в базисных пунктах: снижение — минус (−50 = снижение на 0,5 п.п.), сохранение — 0" : ""}>
-                        {ed.kind === "rate" ? "изменение, б.п." : "значение"}</span>
+                    <span class="lbl" title={ed.kind !== "rate" ? "" : ed.bank === "minfin"
+                        ? "Объём операций Минфина в день, млрд ₽: покупка — плюс (8,4), продажа — минус (−1,2), пауза — 0"
+                        : "Изменение ставки в базисных пунктах: снижение — минус (−50 = снижение на 0,5 п.п.), сохранение — 0"}>
+                        {ed.kind !== "rate" ? "значение" : ed.bank === "minfin" ? "в день, млрд ₽" : "изменение, б.п."}</span>
                     <select class="cond" bind:value={b.type}>{#each CONDS as c}<option value={c.v}>{c.l}</option>{/each}</select>
                     {#if ["gt", "ge", "range"].includes(b.type)}<input class="num" bind:value={b.min} placeholder={b.type === "range" ? "от" : "35"} />{/if}
                     {#if ["lt", "le", "range"].includes(b.type)}<input class="num" bind:value={b.max} placeholder={b.type === "range" ? "до" : "35"} />{/if}
-                    {#if ed.kind === "rate"}<span class="lbl rate">= {rateCondText(b)}</span>{/if}
+                    {#if ed.kind === "rate"}<span class="lbl rate">= {condFor(ed, b)}</span>{/if}
                     <button class="btn small danger right" on:click={() => delBranch(i)}>убрать ветку</button>
                 </div>
                 {#if b.orders.length === 0}<div class="noop">∅ Ничего не делать (только озвучить)</div>{/if}
@@ -327,7 +361,10 @@
         {/each}
         <div class="row-actions">
             <button class="btn" on:click={addBranch}>+ ветка</button>
-            {#if ed.kind === "rate"}
+            {#if ed.kind === "rate" && ed.bank === "minfin"}
+                <button class="btn" on:click={fxBranches}>+ покупка / пауза / продажа</button>
+                <InfoDot text="Добавит три ветки: любые покупки (> 0), пауза (= 0), любые продажи (< 0). Пороги можно уточнить: «больше 10» = покупки больше 10 млрд ₽ в день." />
+            {:else if ed.kind === "rate"}
                 <button class="btn" on:click={rateBranches}>+ снижение / сохранение / повышение</button>
                 <InfoDot text="Добавит три ветки: любое снижение (< 0), сохранение (= 0), любое повышение (> 0). Пороги можно уточнить: «меньше или равно −50» = снижение на 50 б.п. и больше." />
             {/if}
@@ -365,9 +402,11 @@
                         <div class="cmd-id">{w.name} {#if !w.enabled}<span class="badge">выкл</span>{/if}</div>
                         <div class="card-desc">
                             {#if w.kind === "rate"}
-                                🏦 {w.bank === "fed" ? "ФРС" : "ЦБ РФ"} · {w.date || "любой день"} с {w.from}
-                                {#if w.rate_now !== null && w.rate_now !== undefined} · текущая {w.rate_now}%{/if}
-                                · разбор правилами
+                                🏦 {BANK_SHORT[w.bank || "cbr"]} · {w.date || "любой день"} с {w.from}
+                                {#if w.bank !== "minfin" && w.rate_now !== null && w.rate_now !== undefined} · текущая {w.rate_now}%{/if}
+                                {#if w.quiet} · 🤫 тишина за {w.quiet} мин{/if}
+                                {#if w.strict !== false} · только официальная формулировка{/if}
+                                {#if w.bank === "cbr"} · + прямо с cbr.ru{:else if w.bank === "fed"} · + прямо с federalreserve.gov{/if}
                             {:else}
                             🔎 {w.keywords.join(" + ")} · {w.until ? "до " + w.until : "весь день"}
                             {/if}
@@ -386,7 +425,7 @@
                     <div class="bsum">
                         {#each w.branches || [] as b, i}
                             <div><span class="dot" style="background:{COLORS[i % COLORS.length]}"></span>
-                                <b>Ветка {i + 1}</b> ({w.kind === "rate" ? rateCondText(b) : condText(b)}): {b.orders.length ? b.orders.map(orderText).join(", ") : "ничего не делать"}</div>
+                                <b>Ветка {i + 1}</b> ({condFor(w, b)}): {b.orders.length ? b.orders.map(orderText).join(", ") : "ничего не делать"}</div>
                         {/each}
                     </div>
                     <div class="wact">
@@ -395,7 +434,8 @@
                             {busy === "watch_layout" + w.id ? "Раскладываю…" : "Разложить в терминале"}</button>
                         <InfoDot text="Нокс создаст вкладку (если её нет) и добавит недостающие виджеты «Заявка» по веткам — с лотами и ценой из веток. Уже существующие виджеты не трогает. Кнопки не нажимаются." />
                         <input class={w.kind === "rate" ? "dryhead" : "num"} bind:value={dryVal[w.id]}
-                            placeholder={w.kind === "rate" ? "−50 или заголовок: ЦБ РФ СНИЗИЛ СТАВКУ НА 50 Б.П." : "значение"} />
+                            placeholder={w.kind !== "rate" ? "значение" : w.bank === "minfin"
+                                ? "8,4 или текст сообщения Минфина" : "−50 или заголовок: Банк России принял решение…"} />
                         <button class="btn small" on:click={() => act("watch_dry", w, { value: dryVal[w.id] || "" })} disabled={!!busy}>Проверить</button>
                         <InfoDot text="Без нажатий: какая ветка сработает при этом значении и какие виджеты пройдут проверку (тикер, количество, лимиты). 0 — «не выплачивает»." />
                     </div>

@@ -46,3 +46,7 @@ pub use agenda::*;
 // import READER proxy (news filter/monitor) commands
 mod reader;
 pub use reader::*;
+
+// окно «Регистрация»: имя-обращение + ключи сервисов
+mod profile;
+pub use profile::*;

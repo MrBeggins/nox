@@ -460,15 +460,40 @@ _EXTRACT_NEWS_SYS = (
     "«ВТБ допэмиссия на 90 млрд руб» => {\"type\":\"допэмиссия\",\"ticker\":\"ВТБ\",\"value\":\"90 млрд руб\"}\n"
     "«Технический дефолт по облигациям Роснано» => {\"type\":\"дефолт\",\"ticker\":\"Роснано\",\"value\":\"\"}"
 )
+# Ключевые слова событий — С НАЧАЛА СЛОВА (регулярки), а не подстрокой: подстрока «spo» ловила
+# «reSPOnse / SPOkesperson / corresPOndent / tranSPOrtation» — ~30 ложных «событий» в день из английских
+# новостей, мозг называл их «дефолтом» → «Внимание: дефолт». «дополнительн эмисс» / «размещени акц»
+# подстрокой не срабатывали вообще («дополнительнОЙ эмиссии»).
+_W = r"(?<![а-яёa-z])"
+_EVENT_RX = {
+    "дивиденд":   re.compile(_W + r"(?:дивиденд|дивгэп|dividend)"),
+    "оферта":     re.compile(_W + r"оферт"),
+    "допэмиссия": re.compile(_W + r"(?:допэмисс|доп\.?\s?эмисс|дополнительн\w* (?:эмисс|выпуск\w* акц|акци)|"
+                               r"размещени\w* (?:дополнительн\w* )?акций|spo(?![a-z]))"),
+    "дефолт":     re.compile(_W + r"(?:дефолт|техдефолт|не исполнил\w* обязательств)"),
+    "выкуп":      re.compile(_W + r"(?:выкуп|обратн\w* выкуп|buy-?back)"),
+}
+
+
+def event_type(text):
+    """Тип ключевого события по словам (дешёво, без мозга) или None."""
+    low = (text or "").lower().replace("ё", "е")
+    return next((t for t, rx in _EVENT_RX.items() if rx.search(low)), None)
+
+
+def event_confirmed(ev):
+    """Мозг подтвердил ТОТ ЖЕ тип, что нашли слова? Иначе не озвучиваем («другое», «дефолт» вместо «spo»)."""
+    return bool(ev) and ev.get("type") == ev.get("kw_type")
+
+
 def extract_event(text):
-    """Если в новости есть ключевое событие — вернуть {type,ticker,value}, иначе None."""
-    low = (text or "").lower()
-    typ = next((t for t, kws in _EVENT_KW.items() if any(k in low for k in kws)), None)
+    """Если в новости есть ключевое событие — вернуть {type,ticker,value,kw_type}, иначе None."""
+    typ = event_type(text)
     if not typ:
         return None
     j = _json_from(_llm(_EXTRACT_NEWS_SYS, text, max_tokens=90)) or {}
     out = {"type": j.get("type") or typ, "ticker": (j.get("ticker") or "").strip(),
-           "value": (j.get("value") or "").strip()}
+           "value": (j.get("value") or "").strip(), "kw_type": typ}
     _log(f"СОБЫТИЕ {out['type']}: тикер={out['ticker'] or '?'} размер={out['value'] or '?'} | {text[:60]}")
     return out
 

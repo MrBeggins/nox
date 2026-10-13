@@ -28,6 +28,7 @@
         { path: "/commands",  name: "Команды",   icon: "⌘" },
         { path: "/modes",     name: "Режимы",    icon: "⚙" },
         { path: "/tterminal", name: "Т-Терминал", icon: "₮" },
+        { path: "/profile",   name: "Профиль",    icon: "☺" },
     ]
 
     function syncPath() {

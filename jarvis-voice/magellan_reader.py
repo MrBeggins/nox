@@ -221,7 +221,13 @@ def _check_and_alert(data, cfg):
         if now - _last_alert.get(key, 0) < cfg["cooldown"]:
             continue
         _last_alert[key] = now
-        _ipc_announce(_alert_text(tk, m, kinds))
+        try:
+            import nox_features
+            quiet = nox_features.focus_active()      # режим тишины перед новостью по времени
+        except Exception:
+            quiet = False
+        if not quiet:
+            _ipc_announce(_alert_text(tk, m, kinds))
 
 def _monitor_loop():
     while True:

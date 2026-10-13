@@ -95,11 +95,12 @@
     let wakeSaved = false
     let newsMonOn = false
     let smartOn = false
-    let filter: { tickers: string[]; phrases: string[]; sources: string[] } = { tickers: [], phrases: [], sources: [] }
+    let filter: { tickers: string[]; phrases: string[]; sources: string[]; exclude: string[] } = { tickers: [], phrases: [], sources: [], exclude: [] }
     let filterError = ""
     let addTicker = ""
     let addPhrase = ""
     let addSource = ""
+    let addExclude = ""
 
     // активация вручную + оверлей
     let activationHotkey = "ctrl_alt_j"
@@ -190,6 +191,45 @@
     let magAdd = ""
     let magError = ""
 
+    // ---- «Фичи»: выключатели функций (C:\jarvis-voice\nox_features.json; нет ключа — включено) ----
+    const FEATURE_GROUPS = [
+        { title: "Рынок и новости", items: [
+            { key: "news_voice", label: "Чтение новостей вслух", desc: "Озвучка ленты по фильтру со вкладки «Новости» (это тот же переключатель)." },
+            { key: "corp_events", label: "Корпсобытия и раскрытия", desc: "Дивиденды, выкуп, допэмиссии, оферты, дефолты и важные повестки ЦРКИ — читаются всегда, независимо от фильтра. Выключено — такие новости идут обычным фильтром." },
+            { key: "watchers", label: "Наблюдатели", desc: "Сделки по новостям: ветки, слова, решения по ставке ЦБ/ФРС. Выключено — наблюдатели новости не проверяют совсем." },
+            { key: "scenarios", label: "Сценарии «стакан по новости»", desc: "Открытие и подсветка стакана по сценариям со страницы «Наблюдатели»." },
+            { key: "cscalp", label: "CScalp", desc: "Заявки наблюдателей в CScalp и фоновая сверка стаканов. Выключено — в CScalp ничего не нажимается." },
+            { key: "calendar", label: "Календарь событий", desc: "Утренний дайджест в 8:00 и предупреждение «через 3 минуты — …» перед событиями." },
+            { key: "us_macro", label: "Статистика США", desc: "Нонфарм, CPI, PPI, JOLTS, ВВП и PCE с официальных сайтов в момент релиза. Выключено — службы останавливаются." },
+            { key: "magellan", label: "Магеллан", desc: "Order Flow MOEX (russianmagellan.pro): перекос покупатели/продавцы, крупный игрок, резкое движение цены. Выключено — служба останавливается." },
+        ]},
+        { title: "Помощник", items: [
+            { key: "notes", label: "Заметки и напоминания", desc: "«Запомни…», «напомни в 15:00…». Выключено — служба останавливается." },
+            { key: "pc_alerts", label: "Уведомления о загрузке ПК", desc: "«Внимание: процессор загружен на 95 процентов». Команды «открой …» работают и без этого." },
+            { key: "ollama", label: "Локальный мозг Ollama", desc: "Запасной бесплатный мозг на этом компьютере. Облачный мозг работает и без него. Выключено — не запускается вместе с Ноксом (уже запущенный не трогаем)." },
+        ]},
+        { title: "Голос", items: [
+            { key: "greeting", label: "Приветствие при запуске", desc: "«Добрый день» и «Все системы работают в норме» при старте Нокса." },
+            { key: "restart_notices", label: "Сообщения о восстановлении служб", desc: "«Восстановил: …», если служба упала и Нокс поднял её сам." },
+        ]},
+    ]
+    let features: Record<string, boolean> = {}
+    async function featuresLoad() {
+        try { features = JSON.parse(await invoke<string>("features_get")) || {} } catch (e) { features = {} }
+    }
+    // состояние для разметки: «чтение новостей» — тот же переключатель, что на вкладке «Новости»
+    $: fstate = Object.fromEntries(FEATURE_GROUPS.flatMap(g => g.items).map(f =>
+        [f.key, f.key === "news_voice" ? newsMonOn : features[f.key] !== false]))
+    async function featToggle(key: string) {
+        if (key === "news_voice") { await toggleMon(); return }
+        const on = features[key] === false
+        try {
+            await invoke("features_set", { key, on })
+            features = { ...features, [key]: on }
+            if (key === "magellan" && on) setTimeout(loadMagellan, 25000)   // служба поднимется в течение ~20 с
+        } catch (e) { console.error(e) }
+    }
+
     async function loadMagellan() {
         try {
             const f = parseReader(await invoke<string>("magellan_filter_get"))
@@ -227,43 +267,6 @@
     }
 
     // ### ТЕЛЕГРАМ
-    let tgHealth: any = { authorized: false, err: "" }
-    let tgDialogs: any[] = []
-    let tgKeywords: string[] = []
-    let tgMode = "any"
-    let tgApiId = ""
-    let tgApiHash = ""
-    let tgMon = true
-    let tgKwInput = ""
-    let tgMsg = ""
-    async function tgLoad() {
-        try { tgHealth = JSON.parse(await invoke<string>("tg_health")) } catch (e) { tgHealth = { authorized: false, err: "сервис офлайн" } }
-        try { const f = JSON.parse(await invoke<string>("tg_filter_get")); tgKeywords = f.keywords || []; tgMode = f.match || "any" } catch (e) {}
-        try { const m = JSON.parse(await invoke<string>("tg_mon", { on: -1 })); tgMon = !!m.on } catch (e) {}
-        await tgPubLoad()
-    }
-    async function tgSaveCreds() { try { await invoke("tg_creds_set", { apiId: tgApiId, apiHash: tgApiHash }); tgMsg = "Сохранено. Теперь «Войти в Телеграм»." } catch (e) { tgMsg = "Ошибка сохранения" } }
-    async function tgLogin() { try { await invoke("tg_login"); tgMsg = "Открыл окно входа — введи телефон и код, затем «Обновить список чатов»." } catch (e) { tgMsg = "Не смог открыть вход" } }
-    async function tgRefresh() { await tgLoad(); try { const d = JSON.parse(await invoke<string>("tg_dialogs")); tgDialogs = d.items || []; if (!d.ok && d.text) tgMsg = d.text } catch (e) { tgMsg = "Не смог получить чаты" } }
-    async function tgSaveChats() { const ids = tgDialogs.filter(c => c.selected).map(c => c.id).join(","); try { await invoke("tg_chats_set", { ids }); tgMsg = "Чаты сохранены." } catch (e) {} }
-    async function tgAddKw() { const v = tgKwInput.trim(); if (!v) return; try { const r = JSON.parse(await invoke<string>("tg_filter_add", { value: v })); tgKeywords = r.keywords || []; tgKwInput = "" } catch (e) {} }
-    async function tgRemoveKw(k: string) { try { const r = JSON.parse(await invoke<string>("tg_filter_remove", { value: k })); tgKeywords = r.keywords || [] } catch (e) {} }
-    async function tgSetMode(m: string) { tgMode = m; try { await invoke("tg_filter_mode", { mode: m }) } catch (e) {} }
-    async function tgToggleMon() { try { const r = JSON.parse(await invoke<string>("tg_mon", { on: tgMon ? 0 : 1 })); tgMon = !!r.on } catch (e) {} }
-    // публичные каналы без входа (t.me/s/<имя>)
-    let tgPublic: any[] = []
-    let tgPubInput = ""
-    let tgPubMsg = ""
-    let tgPubBusy = false
-    async function tgPubLoad() { try { tgPublic = JSON.parse(await invoke<string>("tg_public_get")).channels || [] } catch (e) {} }
-    async function tgPubAdd() {
-        const v = tgPubInput.trim(); if (!v || tgPubBusy) return
-        tgPubBusy = true; tgPubMsg = "Проверяю канал…"
-        try { const r = JSON.parse(await invoke<string>("tg_public_add", { value: v })); tgPubMsg = r.text || ""; if (r.ok) { tgPublic = r.channels || []; tgPubInput = "" } }
-        catch (e) { tgPubMsg = "Сервис Телеграма не отвечает" }
-        tgPubBusy = false
-    }
-    async function tgPubRemove(n: string) { try { tgPublic = JSON.parse(await invoke<string>("tg_public_remove", { value: n })).channels || [] } catch (e) {} }
 
 
     // Полная остановка Nox (в два клика)
@@ -290,7 +293,7 @@
         } catch (e) { console.error(e) }
         try {
             const f = parseReader(await invoke<string>("reader_filter_get"))
-            if (f.filter) { filter = { tickers: f.filter.tickers||[], phrases: f.filter.phrases||[], sources: f.filter.sources||[] }; smartOn = !!f.filter.smart }
+            if (f.filter) { filter = { tickers: f.filter.tickers||[], phrases: f.filter.phrases||[], sources: f.filter.sources||[], exclude: f.filter.exclude||[] }; smartOn = !!f.filter.smart }
             const m = parseReader(await invoke<string>("reader_mon", { on: -1 }))
             newsMonOn = !!m.on
             filterError = ""
@@ -300,7 +303,7 @@
     async function refreshFilter() {
         try {
             const f = parseReader(await invoke<string>("reader_filter_get"))
-            if (f.filter) filter = { tickers: f.filter.tickers||[], phrases: f.filter.phrases||[], sources: f.filter.sources||[] }
+            if (f.filter) filter = { tickers: f.filter.tickers||[], phrases: f.filter.phrases||[], sources: f.filter.sources||[], exclude: f.filter.exclude||[] }
         } catch (e) { console.error(e) }
     }
 
@@ -414,7 +417,7 @@
     onMount(async () => {
         loadNews()
         loadMagellan()
-        tgLoad()
+        featuresLoad()
         // выбор голоса (движок + диктор)
         try {
             ttsOptions = (JSON.parse(await invoke<string>("voice_list")).options) || []
@@ -687,139 +690,80 @@
                 {#if filter.sources.length}<button class="nx-clr" on:click={() => filterClear('source')}>очистить</button>{/if}
             </div>
         </div>
-    </Tabs.Tab>
-
-    <Tabs.Tab label="Телеграм" icon={Mix}>
-        <Space h="sm" />
-        <div class="nx-block">
-            <label class="nx-lab">Каналы без входа<InfoDot text="Публичные каналы (у которых есть @имя) Nox читает БЕЗ входа и без api_id — через открытую веб-ленту t.me/s/имя, проверяя её каждые ~2 секунды. Новые посты проходят фильтр слов ниже, озвучиваются и запускают сценарии/наблюдатели. Закрытые каналы и группы так не читаются — для них нужен вход в аккаунт." /></label>
-            <div class="nx-row">
-                <input class="nx-in" placeholder="@markettwits или ссылка t.me/…" bind:value={tgPubInput} on:keydown={(e) => e.key === 'Enter' && tgPubAdd()} />
-                <button class="nx-btn" on:click={tgPubAdd} disabled={tgPubBusy}>Добавить</button>
-                <button class="nx-btn" on:click={tgPubLoad}>Обновить</button>
-            </div>
-            {#if tgPubMsg}<p class="nx-hint" style="color:#8ab4ff">{tgPubMsg}</p>{/if}
-            {#if tgPublic.length}
-            <div style="margin-top:8px">
-                {#each tgPublic as c}
-                    <div class="nx-row" style="gap:8px;align-items:center;margin:3px 0">
-                        <span style="color:{c.ok ? '#7fd1a0' : '#e0a86a'}">●</span>
-                        <span style="color:#e9eef6">{c.title}</span>
-                        <span class="nx-hint" style="margin:0">@{c.name}{c.seen ? ` · поймано ${c.seen}` : ""}{c.err ? ` · ${c.err}` : ""}</span>
-                        <button class="nx-clr" on:click={() => tgPubRemove(c.name)}>✕</button>
-                    </div>
-                {/each}
-            </div>
-            {:else}
-                <p class="nx-hint">Пока нет каналов. Добавь новостные каналы, например @markettwits, @rbc_news, @interfaxonline.</p>
-            {/if}
-        </div>
 
         <div class="nx-block">
-            <label class="nx-lab">Вход в аккаунт (для закрытых чатов)<InfoDot text="Нужен только для закрытых каналов, групп и личных чатов. Nox читает сообщения из ВЫБРАННЫХ чатов твоего аккаунта и по фильтру слов озвучивает важное + может запускать сценарии. Только чтение — ничего не постит и не пишет. Нужен api_id/api_hash с my.telegram.org и разовый вход (телефон + код)." /></label>
-            {#if tgHealth.authorized}
-                <p class="nx-hint" style="color:#7fd1a0">✓ Вход выполнен{tgHealth.me ? ` (${tgHealth.me})` : ""}</p>
-            {:else}
-                <p class="nx-hint" style="color:#e0a86a">Не подключено. {tgHealth.err || ""}</p>
-                <div class="nx-row">
-                    <input class="nx-in" placeholder="api_id" bind:value={tgApiId} />
-                    <input class="nx-in" placeholder="api_hash" bind:value={tgApiHash} />
-                    <button class="nx-btn" on:click={tgSaveCreds}>Сохранить</button>
-                </div>
-                <div class="nx-row">
-                    <button class="nx-btn" on:click={tgLogin}>Войти в Телеграм</button>
-                    <span class="nx-hint" style="margin:0">откроется окно для телефона и кода (разово)</span>
-                </div>
-                <p class="nx-hint">api_id и api_hash получаются на my.telegram.org → API development tools (бесплатно). Данные и код никуда не отправляются.</p>
-            {/if}
-            {#if tgMsg}<p class="nx-hint" style="color:#8ab4ff">{tgMsg}</p>{/if}
-        </div>
-
-        {#if tgHealth.authorized}
-        <div class="nx-block">
-            <label class="nx-lab">Чаты под наблюдением<InfoDot text="Нажми «Обновить список чатов», затем отметь чаты/каналы, сообщения из которых Nox будет отслеживать. Пусто — ни один (ничего не слушает). Не забудь «Сохранить выбор»." /></label>
-            <div class="nx-row">
-                <button class="nx-btn" on:click={tgRefresh}>Обновить список чатов</button>
-                <button class="nx-btn" on:click={tgSaveChats}>Сохранить выбор</button>
-            </div>
-            {#if tgDialogs.length}
-            <div style="max-height:240px;overflow:auto;margin-top:8px;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:6px">
-                {#each tgDialogs as c}
-                    <label class="nx-row" style="gap:8px;align-items:center;margin:2px 0;cursor:pointer">
-                        <input type="checkbox" bind:checked={c.selected} />
-                        <span style="color:#e9eef6">{c.name}</span>
-                        <span class="nx-hint" style="margin:0">{c.kind}</span>
-                    </label>
-                {/each}
-            </div>
-            {/if}
-        </div>
-        {/if}
-
-        <div class="nx-block">
-            <label class="nx-lab">Фильтр по словам<InfoDot text="Озвучивать только сообщения, где встречаются эти слова (напр. «санкции», «дивиденды», тикер). Пусто — все сообщения из каналов и выбранных чатов. Режим «любое» — достаточно одного слова; «все» — должны встретиться все." /></label>
-            <div class="nx-row">
-                <input class="nx-in" placeholder="слово или фраза" bind:value={tgKwInput} on:keydown={(e) => e.key === 'Enter' && tgAddKw()} />
-                <button class="nx-btn" on:click={tgAddKw}>Добавить</button>
-                <select class="nx-in" style="max-width:120px" value={tgMode} on:change={(e) => tgSetMode(e.currentTarget.value)}>
-                    <option value="any">любое слово</option>
-                    <option value="all">все слова</option>
-                </select>
-            </div>
-            {#if tgKeywords.length}
-            <div class="nx-row" style="flex-wrap:wrap;gap:6px;margin-top:6px">
-                {#each tgKeywords as k}
-                    <span class="chip">{k}<button class="nx-clr" style="margin-left:4px" on:click={() => tgRemoveKw(k)}>✕</button></span>
-                {/each}
-            </div>
-            {/if}
-        </div>
-
-        <div class="nx-block">
-            <label class="nx-lab">Монитор Телеграма<InfoDot text="Общий выключатель слежки за Телеграмом: озвучка важных сообщений и запуск сценариев/разбора по ним." /></label>
-            <button class="nx-btn" on:click={tgToggleMon}>{tgMon ? "Выключить" : "Включить"}</button>
-            <span class="nx-hint" style="margin:0 0 0 8px">{tgMon ? "следит за каналами и выбранными чатами" : "выключен"}</span>
-        </div>
-    </Tabs.Tab>
-
-    <Tabs.Tab label="Магеллан" icon={Cube}>
-        <Space h="sm" />
-
-        <div class="nx-block">
-            <div class="nx-row">
-                <label class="nx-lab" style="margin:0">Слежка за Order Flow (Russian Magellan)</label>
-                <label class="nx-sw" style="margin-left:auto"><input type="checkbox" checked={magMon} on:change={magToggleMon} /> {magMon ? "следит" : "выключено"}</label>
-            </div>
-            <p class="nx-desc">Nox читает поток сделок MOEX с russianmagellan.pro и уведомляет по выбранным бумагам: перекос покупатели/продавцы, резкое движение цены, крупный игрок.</p>
-        </div>
-
-        {#if magError}<div class="nx-err">{magError}</div>{/if}
-
-        <div class="nx-block">
-            <label class="nx-lab">Бумаги под наблюдением<InfoDot text="Тикеры, по которым Магеллан следит за потоком сделок (order flow MOEX) и предупреждает о сильном перекосе покупатели/продавцы, крупных сделках и резком движении цены." /></label>
+            <label class="nx-lab">Не читать<InfoDot text="Новости, в ЗАГОЛОВКЕ которых есть эти слова (в любой форме: «лимит» — и «лимитов», «закон» — и «законопроект»), Нокс не озвучивает — даже если подошли источник, фраза или это корпсобытие. Наблюдатели и сценарии это не отключает: сделки по новостям работают как раньше." /></label>
             <div class="chips">
-                {#each magTickers as v}
-                    <span class="chip tk">{v}<button on:click={() => magRemoveTicker(v)}>✕</button></span>
+                {#each filter.exclude || [] as v}
+                    <span class="chip ex">{v}<button on:click={() => filterRemove("exclude", v)}>✕</button></span>
                 {/each}
-                {#if !magTickers.length}<span class="chip-empty">пусто — добавьте тикеры</span>{/if}
+                {#if !(filter.exclude || []).length}<span class="chip-empty">пусто</span>{/if}
             </div>
             <div class="nx-row">
-                <input class="nx-in" placeholder="SMLT, SBER, LKOH…" bind:value={magAdd}
-                    on:keydown={(e) => { if (e.key==='Enter') magAddTicker() }} />
-                <button class="nx-btn" on:click={magAddTicker}>Добавить</button>
-                {#if magTickers.length}<button class="nx-clr" on:click={magClearAll}>очистить</button>{/if}
+                <input class="nx-in" placeholder="риск-параметры, лимит, закон…" bind:value={addExclude}
+                    on:keydown={(e) => { if (e.key==='Enter') { filterAdd('exclude', addExclude); addExclude='' } }} />
+                <button class="nx-btn" on:click={() => { filterAdd('exclude', addExclude); addExclude='' }}>Добавить</button>
+                {#if (filter.exclude || []).length}<button class="nx-clr" on:click={() => filterClear('exclude')}>очистить</button>{/if}
             </div>
         </div>
+    </Tabs.Tab>
 
-        <div class="nx-block">
-            <label class="nx-lab">Пороги уведомлений<InfoDot text="Когда Магеллан подаёт голос: дисбаланс покупатели/продавцы (%), минимальное движение цены (%), минимальный оборот (млн ₽). Чем выше пороги — тем реже и только о крупном. Повтор не чаще раза в 20 минут." /></label>
-            <div class="nx-row" style="gap:16px; flex-wrap:wrap">
-                <label class="nx-fld">Дисбаланс, %<input class="nx-num" type="number" min="1" max="50" bind:value={magImb} on:change={magSaveThresholds} /></label>
-                <label class="nx-fld">Движение цены, %<input class="nx-num" type="number" min="0.1" step="0.1" bind:value={magPrice} on:change={magSaveThresholds} /></label>
-                <label class="nx-fld">Мин. оборот, млн ₽<input class="nx-num" type="number" min="0" step="50" bind:value={magTurn} on:change={magSaveThresholds} /></label>
+    <Tabs.Tab label="Фичи" icon={Cube}>
+        <Space h="sm" />
+        <p class="nx-desc">Включайте только то, что нужно. Службы останавливаются и запускаются сами в течение ~20 секунд,
+            перезапускать Нокс не надо. Исполнение заявок — на странице «Т-Терминал», оверлей-шар — во вкладке «Интерфейс».</p>
+        {#each FEATURE_GROUPS as g}
+            <div class="nx-group">{g.title}</div>
+            {#each g.items as f}
+                <div class="nx-block feat" class:off={!fstate[f.key]}>
+                    <div class="nx-row">
+                        <label class="nx-lab" style="margin:0">{f.label}</label>
+                        <label class="nx-sw" style="margin-left:auto"><input type="checkbox" checked={fstate[f.key]}
+                            on:change={() => featToggle(f.key)} /> {fstate[f.key] ? "включено" : "выключено"}</label>
+                    </div>
+                    <p class="nx-desc">{f.desc}</p>
+                    {#if f.key === "magellan" && fstate.magellan}
+                        <div class="feat-sub">
+            <div class="nx-block">
+                <div class="nx-row">
+                    <label class="nx-lab" style="margin:0">Слежка за Order Flow (Russian Magellan)</label>
+                    <label class="nx-sw" style="margin-left:auto"><input type="checkbox" checked={magMon} on:change={magToggleMon} /> {magMon ? "следит" : "выключено"}</label>
+                </div>
+                <p class="nx-desc">Nox читает поток сделок MOEX с russianmagellan.pro и уведомляет по выбранным бумагам: перекос покупатели/продавцы, резкое движение цены, крупный игрок.</p>
             </div>
-            <p class="nx-hint">Уведомление сработает, если по бумаге под наблюдением перекос ≥ дисбаланса ИЛИ движение цены ≥ порога (при обороте выше минимума). Повтор — не чаще раза в 20 минут.</p>
-        </div>
+
+            {#if magError}<div class="nx-err">{magError}</div>{/if}
+
+            <div class="nx-block">
+                <label class="nx-lab">Бумаги под наблюдением<InfoDot text="Тикеры, по которым Магеллан следит за потоком сделок (order flow MOEX) и предупреждает о сильном перекосе покупатели/продавцы, крупных сделках и резком движении цены." /></label>
+                <div class="chips">
+                    {#each magTickers as v}
+                        <span class="chip tk">{v}<button on:click={() => magRemoveTicker(v)}>✕</button></span>
+                    {/each}
+                    {#if !magTickers.length}<span class="chip-empty">пусто — добавьте тикеры</span>{/if}
+                </div>
+                <div class="nx-row">
+                    <input class="nx-in" placeholder="SMLT, SBER, LKOH…" bind:value={magAdd}
+                        on:keydown={(e) => { if (e.key==='Enter') magAddTicker() }} />
+                    <button class="nx-btn" on:click={magAddTicker}>Добавить</button>
+                    {#if magTickers.length}<button class="nx-clr" on:click={magClearAll}>очистить</button>{/if}
+                </div>
+            </div>
+
+            <div class="nx-block">
+                <label class="nx-lab">Пороги уведомлений<InfoDot text="Когда Магеллан подаёт голос: дисбаланс покупатели/продавцы (%), минимальное движение цены (%), минимальный оборот (млн ₽). Чем выше пороги — тем реже и только о крупном. Повтор не чаще раза в 20 минут." /></label>
+                <div class="nx-row" style="gap:16px; flex-wrap:wrap">
+                    <label class="nx-fld">Дисбаланс, %<input class="nx-num" type="number" min="1" max="50" bind:value={magImb} on:change={magSaveThresholds} /></label>
+                    <label class="nx-fld">Движение цены, %<input class="nx-num" type="number" min="0.1" step="0.1" bind:value={magPrice} on:change={magSaveThresholds} /></label>
+                    <label class="nx-fld">Мин. оборот, млн ₽<input class="nx-num" type="number" min="0" step="50" bind:value={magTurn} on:change={magSaveThresholds} /></label>
+                </div>
+                <p class="nx-hint">Уведомление сработает, если по бумаге под наблюдением перекос ≥ дисбаланса ИЛИ движение цены ≥ порога (при обороте выше минимума). Повтор — не чаще раза в 20 минут.</p>
+            </div>
+                        </div>
+                    {/if}
+                </div>
+            {/each}
+        {/each}
     </Tabs.Tab>
 
     <Tabs.Tab label="Интерфейс" icon={Gear}>
@@ -1192,6 +1136,9 @@ $nx-accent: #35e0d0; $nx-amber: #f6b352; $nx-muted: #8592a6;
 .chip.tk { color: $nx-amber; border-color: rgba(246,179,82,0.3); font-family: "JetBrains Mono", monospace; }
 .chip.ph { color: $nx-accent; border-color: rgba(53,224,208,0.3); }
 .chip.src { color: rgba(255,255,255,0.85); }
+.nx-block.feat.off { opacity: 0.6; }
+.feat-sub { margin-top: 0.6rem; padding-left: 0.6rem; border-left: 2px solid rgba(82,254,254,0.15); }
+.chip.ex { color: #fca5a5; border-color: rgba(239,68,68,0.35); }
 .chip-empty { font-size: 0.74rem; color: rgba(255,255,255,0.3); font-style: italic; }
 .stop-nox { width: 100%; padding: 11px; border-radius: 10px; cursor: pointer; font-weight: 700; font-size: 0.82rem;
     background: rgba(255,109,109,0.12); color: #ff6d6d; border: 1px solid rgba(255,109,109,0.4); }

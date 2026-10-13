@@ -99,6 +99,20 @@ pub struct Settings {
     #[serde(default)]
     pub dnd: bool,
 
+    // ### ПРОФИЛЬ (окно «Регистрация»)
+    /// Как Нокс обращается к пользователю вместо «сэр». Пусто — «сэр».
+    #[serde(default)]
+    pub user_name: String,
+    /// Ключ FMP (financialmodelingprep.com) — резервный экономкалендарь (calendar_server.py).
+    /// Раньше жил в app.db «сбоку» и стирался при любом сохранении настроек.
+    #[serde(default)]
+    pub fmp_key: String,
+    /// Токен Trading Tools и ключ Stocksi Ultimate — пока только хранятся (Нокс их не использует).
+    #[serde(default)]
+    pub tt_token: String,
+    #[serde(default)]
+    pub stocksi_key: String,
+
     pub api_keys: ApiKeys,
 }
 
@@ -161,6 +175,10 @@ impl Settings {
             "activation_hotkey"         => Some(self.activation_hotkey.clone()),
             "mic_muted"                 => Some(self.mic_muted.to_string()),
             "dnd"                       => Some(self.dnd.to_string()),
+            "user_name"                 => Some(self.user_name.clone()),
+            "fmp_key"                   => Some(self.fmp_key.clone()),
+            "tt_token"                  => Some(self.tt_token.clone()),
+            "stocksi_key"               => Some(self.stocksi_key.clone()),
             "wake_word"                 => Some(self.wake_word.clone()),
             "active_mode"               => Some(self.active_mode.clone()),
             "modes"                     => Some(self.modes.clone()),
@@ -276,6 +294,18 @@ impl Settings {
             "dnd" => {
                 self.dnd = parse_bool(val)?;
             }
+            "user_name" => {
+                self.user_name = val.trim().to_string();
+            }
+            "fmp_key" => {
+                self.fmp_key = val.trim().to_string();
+            }
+            "tt_token" => {
+                self.tt_token = val.trim().to_string();
+            }
+            "stocksi_key" => {
+                self.stocksi_key = val.trim().to_string();
+            }
             "wake_word" => {
                 self.wake_word = val.trim().to_lowercase();
             }
@@ -329,6 +359,10 @@ impl Settings {
             "activation_hotkey",
             "mic_muted",
             "dnd",
+            "user_name",
+            "fmp_key",
+            "tt_token",
+            "stocksi_key",
             "wake_word",
             "active_mode",
             "modes",
@@ -382,6 +416,11 @@ impl Default for Settings {
             activation_hotkey: default_activation_hotkey(),
             mic_muted: false,
             dnd: false,
+
+            user_name: String::new(),
+            fmp_key: String::new(),
+            tt_token: String::new(),
+            stocksi_key: String::new(),
 
             wake_word: default_wake_word(),
             active_mode: String::new(),

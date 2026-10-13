@@ -138,6 +138,46 @@ def ensure_tts():
 
 STOPPED_FLAG = r"C:\jarvis-voice\nox_stopped.flag"   # пользователь остановил Nox (трей «Выход» / кнопка)
 
+# «Фичи» (nox_features.json): служба выключена — не поднимать и погасить, если работает
+_SERVICE_FEATURE = {"magellan": ("magellan", [8127]), "bls": ("us_macro", [8128]), "bea": ("us_macro", [8129]),
+                    "notes": ("notes", [8133]), "ollama": ("ollama", [])}   # Ollama — только не запускаем
+
+
+def _feature_on(key):
+    try:
+        sys.path.insert(0, VOICE_DIR) if VOICE_DIR not in sys.path else None
+        import nox_features
+        return nox_features.enabled(key)
+    except Exception:
+        return True
+
+
+def _stop_port(port):
+    """Погасить нашу службу, слушающую порт (python из .venv запускает дочерний python — гасим обоих)."""
+    try:
+        import psutil
+        for c in psutil.net_connections(kind="tcp"):
+            if c.laddr and c.laddr.port == port and c.status == psutil.CONN_LISTEN and c.pid:
+                p = psutil.Process(c.pid)
+                parent = p.parent()
+                p.kill()
+                if parent and "python" in (parent.name() or "").lower() and \
+                        any(a.endswith(".py") for a in (parent.cmdline() or [])):
+                    parent.kill()
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _focus_quiet():
+    try:
+        import nox_features
+        return nox_features.focus_active()
+    except Exception:
+        return False
+
+
 def _user_stopped():
     return os.path.exists(STOPPED_FLAG)
 
@@ -152,7 +192,6 @@ def _tick(include_gui=True):
         ("magellan", lambda: ensure_py("magellan_reader.py", 8127, "mag", 20),  "Магеллан"),
         ("bls",      lambda: ensure_py("bls_reader.py", 8128, "bls", 15),       "статистика США"),
         ("bea",      lambda: ensure_py("bea_reader.py", 8129, "bea", 15),       "ВВП и PCE США"),
-        ("tg",       lambda: ensure_py("tg_reader.py", 8131, "tg", 15),         "Телеграм"),
         ("sys",      lambda: ensure_py("sys_monitor.py", 8132, "sys", 12),      "монитор ПК"),
         ("notes",    lambda: ensure_py("nox_notes.py", 8133, "notes", 12),      "заметки"),
         ("app",      lambda: ensure_app(),                                      "голосовой движок"),
@@ -161,6 +200,11 @@ def _tick(include_gui=True):
     for key, fn, label in checks:
         # окно GUI поднимаем только при запуске: если пользователь его закрыл — не переоткрываем
         if key == "gui" and not include_gui:
+            continue
+        feat = _SERVICE_FEATURE.get(key)
+        if feat and not _feature_on(feat[0]):
+            for port in feat[1]:
+                _stop_port(port)
             continue
         if not _grace_ok(key):
             continue
@@ -198,10 +242,10 @@ def main():
                     break
                 time.sleep(2)
             time.sleep(3)   # дать F5 прогреться (первый инференс)
-            if _port_up(9712):
+            if _port_up(9712) and _feature_on("greeting"):
                 _announce("Все системы работают в норме, сэр.")
             first = False
-        elif done:
+        elif done and _feature_on("restart_notices") and not _focus_quiet():
             # уже после старта: если что-то упало и поднялось — краткое уведомление (голосом F5)
             time.sleep(8)
             if _port_up(9712) and _voice_ready():

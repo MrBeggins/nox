@@ -234,7 +234,8 @@ pub fn speak_nfe(text: &str, nfe: Option<u32>, speed: Option<f32>) {
 
 /// Синтез+воспроизведение одного куска текста (F5, с откатом на Pavel).
 fn speak_piece(text: &str, nfe: Option<u32>, speed: Option<f32>) {
-    let text = text.trim();
+    let text = crate::address::personalize(text.trim());   // «сэр» → имя из профиля
+    let text = text.as_str();
     if text.is_empty() {
         return;
     }

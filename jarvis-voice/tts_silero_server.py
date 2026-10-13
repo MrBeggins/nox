@@ -89,6 +89,18 @@ def _load_user_speed():
         return None
 _user_speed = _load_user_speed()
 
+# Тон голоса: сдвиг в процентах через SSML <prosody pitch="-25%"> (родной для Silero,
+# без артефактов). Только отрицательные/положительные проценты со знаком — «80%» модель
+# игнорирует. aidar: 0 → ~122 Гц, -22% → ~100, -25% → ~95, -30% → ~86 (замер 2026-10-12).
+_PITCH_FILE = r"C:\jarvis-voice\tts_silero_pitch.txt"
+def _load_pitch():
+    try:
+        v = int(float(open(_PITCH_FILE, encoding="utf-8").read().strip()))
+        return v if -40 <= v <= 30 else 0
+    except Exception:
+        return 0
+_pitch = _load_pitch()
+
 def _xml_escape(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -100,10 +112,14 @@ def synth(text: str, speed: float = 1.0) -> bytes:
     if _user_speed:
         speed = _user_speed
     speed = max(0.7, min(1.5, float(speed)))
+    attrs = []
+    if abs(speed - 1.0) > 0.02:
+        attrs.append(f'rate="{int(round(speed*100))}%"')
+    if _pitch:
+        attrs.append(f'pitch="{_pitch:+d}%"')
     with _lock:
-        if abs(speed - 1.0) > 0.02:
-            rate = f"{int(round(speed*100))}%"
-            ssml = f'<speak><prosody rate="{rate}">{_xml_escape(norm)}</prosody></speak>'
+        if attrs:
+            ssml = f'<speak><prosody {" ".join(attrs)}>{_xml_escape(norm)}</prosody></speak>'
             audio = _model.apply_tts(ssml_text=ssml, speaker=SPEAKER,
                                      sample_rate=SAMPLE_RATE, put_accent=True, put_yo=True)
         else:
@@ -162,6 +178,22 @@ def set_speaker(name: str = ""):
         except Exception: pass
         return {"ok": True, "speaker": SPEAKER}
     return {"ok": False, "speaker": SPEAKER, "available": SPEAKERS}
+
+@app.get("/pitch")
+def get_pitch():
+    return {"value": _pitch}
+
+@app.get("/set_pitch")
+def set_pitch(v: int = 0):
+    """Тон в процентах (-40..+30, 0 = как у диктора). Сохраняется в tts_silero_pitch.txt."""
+    global _pitch
+    _pitch = max(-40, min(30, int(v)))
+    try:
+        if _pitch: open(_PITCH_FILE, "w", encoding="utf-8").write(str(_pitch))
+        elif os.path.exists(_PITCH_FILE): os.remove(_PITCH_FILE)
+    except Exception:
+        pass
+    return {"value": _pitch}
 
 @app.get("/speed")
 def get_speed():

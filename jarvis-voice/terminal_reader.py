@@ -32,6 +32,17 @@ try:
 except Exception:
     nox_watchers = None
 try:
+    import nox_features  # выключатели функций («Фичи» в Настройках)
+except Exception:
+    nox_features = None
+
+def _feat(key):
+    try:
+        return nox_features.enabled(key) if nox_features else True
+    except Exception:
+        return True
+
+try:
     import nox_cscalp   # стаканы CScalp по тикеру + горячие клавиши (проп без API)
 except Exception:
     nox_cscalp = None
@@ -300,6 +311,9 @@ def start_worker():
         _worker_started = True
         threading.Thread(target=_worker, daemon=True).start()
         threading.Thread(target=_monitor_loop, daemon=True).start()
+        threading.Thread(target=_event_worker, daemon=True).start()     # корпсобытия — мозг в фоне
+        threading.Thread(target=_focus_loop, daemon=True).start()       # режим тишины перед новостью по времени
+        threading.Thread(target=_official_loop, daemon=True).start()    # решения ЦБ/ФРС прямо с cbr.ru / federalreserve.gov
         threading.Thread(target=_terminal_health_loop, daemon=True).start()
         threading.Thread(target=_overlay_loop, daemon=True).start()   # подписи веток наблюдателей
         threading.Thread(target=_cscalp_arm_loop, daemon=True).start()  # сверка стаканов CScalp у наблюдателей
@@ -349,6 +363,8 @@ def _submit(fn, timeout=30):
 FILTER_FILE = r"C:\jarvis-voice\news_filter.json"
 # Источники по умолчанию (регуляторные/биржевые) — их читаем всегда.
 _DEFAULT_SOURCES = ["нкц", "e-disclosure", "e disclosure", "московская бирж", "мосбирж", "moex"]
+# «Не читать» по умолчанию (2026-10-12, жалоба: биржевые уведомления НКЦ, законы, лимиты)
+_DEFAULT_EXCLUDE = ["риск-параметры", "ставки рыночного риска", "лимит", "ценовой коридор"]
 
 def _load_filter():
     try:
@@ -358,11 +374,15 @@ def _load_filter():
     d.setdefault("tickers", [])
     d.setdefault("phrases", [])
     d.setdefault("smart", False)   # умный отбор новостей через Ollama
+    if "exclude" not in d:         # «Не читать»: сильнее источника/фраз/корпсобытий (наблюдатели — не трогает)
+        d["exclude"] = list(_DEFAULT_EXCLUDE)
+        _save_filter(d)
     if "sources" not in d:
         d["sources"] = list(_DEFAULT_SOURCES)
     d["smart"] = bool(d.get("smart"))
     d["tickers"] = [str(x).upper().strip() for x in d["tickers"] if str(x).strip()]
     d["phrases"] = [str(x).lower().strip() for x in d["phrases"] if str(x).strip()]
+    d["exclude"] = [str(x).lower().strip() for x in d.get("exclude") or [] if str(x).strip()]
     d["sources"] = [str(x).lower().strip() for x in d["sources"] if str(x).strip()]
     return d
 
@@ -669,6 +689,14 @@ def _phrase_hit(phrase, low):
         return False
     return True
 
+def _excluded(item, cfg):
+    """Заголовок попал в «Не читать» (любая форма слова: «лимит» -> «лимитов», «закон» -> «законопроект»)."""
+    ex = cfg.get("exclude") or []
+    if not ex:
+        return False
+    low = (item.get("text", "") or "").lower().replace("ё", "е")
+    return any(_phrase_hit(p.replace("ё", "е"), low) for p in ex)
+
 def _match(item, cfg):
     """Реагировать только на заданное: тикер ИЛИ фраза (любая форма слова) ИЛИ источник из конфига."""
     tks = [t.upper() for t in (item.get("tickers") or [])]
@@ -685,6 +713,112 @@ def _match(item, cfg):
     return False
 
 _seen_news = set()
+_event_q = queue.Queue()
+_focus = {"active": None}     # режим тишины: {"wid","reason","until","at"} или None
+
+def _official_loop():
+    """Решения ЦБ и ФРС ПРЯМО с официальных сайтов (nox_official) — параллельно с лентой, кто первый.
+    Окно наблюдателя «Новость по времени» (cbr/fed): за 90 с — заранее открыть соединение (до сайта ФРС
+    из РФ TLS идёт 0.4–13 с: Cloudflare замедлен); T−20 с … T+2 мин — опрос ~3 раза/с; дальше до T+15 мин —
+    раз в 5 с. Найденное решение отдаётся наблюдателям как первая новость (on_news под замком — без дублей)."""
+    try:
+        import nox_official
+    except Exception:
+        return
+    done, mark = set(), {}
+    while True:
+        fast = False
+        try:
+            if nox_watchers and _feat("watchers"):
+                now = nox_watchers._now()
+                today = now.strftime("%Y-%m-%d")
+                secs = now.hour * 3600 + now.minute * 60 + now.second
+                polled = set()
+                for w in nox_watchers.load()["watchers"]:
+                    bank = w.get("bank")
+                    if not (w.get("enabled") and w.get("kind") == "rate" and bank in ("cbr", "fed") and w.get("from")):
+                        continue
+                    if (w.get("date") and w["date"] != today) or (w.get("once") and w.get("fired_day") == today):
+                        continue
+                    key = (bank, today)
+                    if key in done or key in polled:
+                        continue
+                    h, m, sec = (int(x) for x in w["from"].split(":"))
+                    d = secs - (h * 3600 + m * 60 + sec)
+                    if -90 <= d < -20:
+                        if time.time() - mark.get(("warm",) + key, 0) > 25:
+                            mark[("warm",) + key] = time.time()
+                            nox_official.warm(bank, today)
+                        continue
+                    if not (-20 <= d <= 900):
+                        continue
+                    if d > 120 and time.time() - mark.get(("slow",) + key, 0) < 5:
+                        continue
+                    mark[("slow",) + key] = time.time()
+                    polled.add(key)
+                    fast = fast or d <= 120
+                    txt, ms, st = nox_official.poll(bank, today)
+                    if txt:
+                        done.add(key)
+                        src = "cbr.ru" if bank == "cbr" else "federalreserve.gov"
+                        if nox_scenarios:
+                            nox_scenarios._log(f"ОФИЦИАЛЬНО ({src}, запрос {ms} мс): {txt[:140]}")
+                        item = {"text": txt, "body": "", "tickers": [], "source": src,
+                                "seen": time.time() * 1000, "_detect": time.time()}
+                        nox_watchers.on_news([item], "trading")
+        except Exception:
+            pass
+        time.sleep(0.3 if fast else 1.0)
+
+def _focus_loop():
+    """Режим тишины перед новостью по времени: за N минут до выхода (наблюдатель «Решение по времени») новости,
+    корпсобытия и календарь НЕ читаются — ждём только нужное сообщение. Отчёт наблюдателя о сделке звучит.
+    Другим службам (монитор ПК, Магеллан, watchdog) — через nox_focus.json."""
+    prev = None
+    focus_file = r"C:\jarvis-voice\nox_focus.json"
+    while True:
+        try:
+            st = nox_watchers.focus_state() if (nox_watchers and _feat("watchers")) else None
+            _focus["active"] = st
+            if st:
+                if not prev or prev.get("wid") != st["wid"] or abs(prev.get("until", 0) - st["until"]) > 5:
+                    with open(focus_file, "w", encoding="utf-8") as f:
+                        json.dump({"until": st["until"], "reason": st["reason"]}, f, ensure_ascii=False)
+                if not prev or prev.get("wid") != st["wid"]:
+                    _ipc_announce(f"Режим тишины: жду {st['reason']} в {st['at']}. Новости не читаю.")
+            else:
+                if os.path.exists(focus_file):
+                    os.remove(focus_file)
+                if prev:
+                    w = nox_watchers.get(prev["wid"]) if nox_watchers else None
+                    today = nox_watchers._now().strftime("%Y-%m-%d") if nox_watchers else ""
+                    done = (not w) or (not w.get("enabled")) or w.get("fired_day") == today
+                    if not done:            # время вышло, а решения нет
+                        _ipc_announce(f"Режим тишины снят: {prev['reason']} пока не вышло. Снова читаю новости.")
+            prev = st
+        except Exception:
+            pass
+        time.sleep(1)
+
+def _event_worker():
+    """Корпсобытия по очереди (порядок новостей сохраняется): мозг извлекает тип/тикер/размер.
+    Озвучиваем, только если мозг подтвердил ТОТ ЖЕ тип, что нашли слова; иначе новость идёт
+    обычным фильтром (как все остальные)."""
+    while True:
+        it, cfg = _event_q.get()
+        try:
+            import nox_scenarios as _ns
+            text = it.get("text", "")
+            ev = _ns.extract_event(text)
+            if _focus.get("active"):
+                continue                    # разбор шёл до тишины — уже не озвучиваем
+            if _ns.event_confirmed(ev):
+                if _mon_enabled() and not _is_dup(text):
+                    _ipc_announce(_ns.speak_event(ev)); time.sleep(0.4)
+            elif _mon_enabled() and _match(it, cfg) and not _is_dup(text):
+                _ipc_announce(_shorten(it)); time.sleep(0.4)
+        except Exception:
+            pass
 
 def _monitor_loop():
     _ready.wait(90)
@@ -722,23 +856,30 @@ def _monitor_loop():
                 it["_detect"] = _t_detect
             # Сценарии (авто-клик стакана) работают ВСЕГДА, независимо от монитора озвучки.
             if new_items:
-                try:
-                    import nox_scenarios
-                    nox_scenarios.on_news(new_items)
-                except Exception:
-                    pass
-                try:
-                    import nox_watchers
-                    nox_watchers.on_news(new_items, "trading")   # «мультимозг»: наблюдатели на 1 новость
-                except Exception:
-                    pass
+                if _feat("scenarios"):
+                    try:
+                        import nox_scenarios
+                        nox_scenarios.on_news(new_items)
+                    except Exception:
+                        pass
+                if _feat("watchers"):
+                    try:
+                        import nox_watchers
+                        nox_watchers.on_news(new_items, "trading")   # «мультимозг»: наблюдатели на 1 новость
+                    except Exception:
+                        pass
             # Всегда-он разбор ключевых событий (дивиденд/оферта/допэмиссия/дефолт/выкуп):
             # тикер+размер ловим и ЛОГИРУЕМ всегда; озвучиваем при включённом мониторе.
             for it in reversed(new_items):      # в хронологическом порядке
                 low = it.get("text", "").lower()
+                if _focus.get("active"):
+                    continue                     # режим тишины: ждём только нужную новость, остальное не читаем
+                if _excluded(it, cfg):
+                    continue                     # «Не читать»: риск-параметры НКЦ, лимиты, законы…
                 disc = None
+                corp = _feat("corp_events")      # «Фичи»: выкл — новость идёт обычным фильтром
                 try:
-                    disc = _disclosure(it)
+                    disc = _disclosure(it) if corp else None
                 except Exception:
                     disc = None
                 if disc:
@@ -746,17 +887,17 @@ def _monitor_loop():
                     if _mon_enabled() and not _is_dup(disc):
                         _ipc_announce(disc); time.sleep(0.4)
                     continue
-                ev = None
+                ev_typ = None
                 try:
                     import nox_scenarios as _ns
-                    ev = _ns.extract_event(it.get("text", ""))
+                    ev_typ = _ns.event_type(it.get("text", "")) if corp else None
                 except Exception:
-                    ev = None
-                if ev:
-                    # дедуп: ту же новость из другого источника не озвучиваем 15 мин
-                    if _mon_enabled() and not _is_dup(it.get("text", "")):
-                        _ipc_announce(_ns.speak_event(ev)); time.sleep(0.4)
-                    continue                     # ключевое событие уже обработано
+                    ev_typ = None
+                if ev_typ:
+                    # разбор мозгом (облако 4–9 с) — в фоне: опрос ленты не ждёт (раньше стоял на каждой
+                    # «событийной» новости — в окне решения по ставке это задержало бы реакцию)
+                    _event_q.put((it, cfg))
+                    continue
                 if _mon_enabled():               # прочие новости — прежняя логика
                     if smart:
                         say = _ollama_judge(it.get("text", ""))
@@ -1095,7 +1236,7 @@ def _start_cal_loop():
                     # утренний импорт+дайджест раз в день в ~08:00 МСК
                     if now.hour >= 8 and now.strftime("%Y-%m-%d") != last_day:
                         last_day = now.strftime("%Y-%m-%d")
-                        _cal_import_and_digest(announce=True)
+                        _cal_import_and_digest(announce=_feat("calendar") and not _focus.get("active"))
             except Exception:
                 pass
             _t_sleep = 300
@@ -1132,8 +1273,9 @@ def _start_cal_arm_loop():
                         if nox_scenarios:
                             try: nox_scenarios.arm_window(360)
                             except Exception: pass
-                        _ipc_announce(f"Через {max(1, int(round(mins)))} минут — "
-                                      f"{e.get('text', 'событие')[:90]}, сэр. Готовлюсь.")
+                        if _feat("calendar") and not _focus.get("active"):
+                            _ipc_announce(f"Через {max(1, int(round(mins)))} минут — "
+                                          f"{e.get('text', 'событие')[:90]}, сэр. Готовлюсь.")
             except Exception:
                 pass
             _t.sleep(40)
@@ -1211,6 +1353,11 @@ def filter_add(kind: str = "phrase", q: str = ""):
         if val not in cfg["sources"]:
             cfg["sources"].append(val)
         say = f"Добавил источник {val}."
+    elif kind.startswith("exclude"):
+        v = val.lower()
+        if v not in cfg["exclude"]:
+            cfg["exclude"].append(v)
+        say = f"Не буду читать новости про «{v}»."
     else:
         if val not in cfg["phrases"]:
             cfg["phrases"].append(val)
@@ -1227,6 +1374,8 @@ def filter_clear(kind: str = ""):
         cfg["phrases"] = []
     elif kind.startswith("source"):
         cfg["sources"] = []
+    elif kind.startswith("exclude"):
+        cfg["exclude"] = []
     else:
         cfg["tickers"] = []; cfg["phrases"] = []
     _save_filter(cfg)
@@ -1243,6 +1392,9 @@ def filter_remove(kind: str = "phrase", q: str = ""):
     elif kind.startswith("source"):
         cfg["sources"] = [x for x in cfg["sources"] if x != val]
         say = f"Убрал источник {val}."
+    elif kind.startswith("exclude"):
+        cfg["exclude"] = [x for x in cfg["exclude"] if x != val.lower()]
+        say = f"Снова читаю новости про «{val}»."
     else:
         cfg["phrases"] = [x for x in cfg["phrases"] if x != val]
         say = f"Больше не реагирую на «{val}»."
@@ -1269,6 +1421,8 @@ def filter_show():
         parts.append("фразы: " + ", ".join(cfg["phrases"]))
     if cfg["sources"]:
         parts.append("источники: " + ", ".join(cfg["sources"]))
+    if cfg.get("exclude"):
+        parts.append("не читать: " + ", ".join(cfg["exclude"]))
     return {"text": ("Фильтр — " + "; ".join(parts)) if parts else "Фильтр пуст, сэр.", "filter": cfg}
 
 @app.get("/terminal_show")
@@ -1885,7 +2039,9 @@ def _watch_exec(w, branch, news_text, dry=False, meta=None):
     really = enabled and not dry
     cs_box, cs_thread = {}, None
     if cs_orders:
-        if not nox_cscalp:
+        if not _feat("cscalp"):
+            cs_box["err"] = "CScalp выключен во вкладке «Фичи»"
+        elif not nox_cscalp:
             cs_box["err"] = "модуль CScalp не загружен"
         else:
             pairs = [(o["ticker"], "buy_market" if o.get("side") == "buy" else "sell_market") for o in cs_orders]
@@ -1996,7 +2152,9 @@ def _cscalp_arm_loop():
     """Стаканы CScalp из включённых наблюдателей — держать сверенными (nox_cscalp сверяет их в простое)."""
     while True:
         try:
-            if nox_cscalp and nox_watchers:
+            if nox_cscalp and nox_watchers and not _feat("cscalp"):
+                nox_cscalp.arm(set())        # «Фичи»: CScalp выключен — не сверять стаканы
+            elif nox_cscalp and nox_watchers:
                 nox_cscalp.arm({o["ticker"] for w in nox_watchers.load()["watchers"] if w.get("enabled", True)
                                 for b in w.get("branches") or [] for o in b.get("orders") or []
                                 if o.get("venue") == "cscalp"})

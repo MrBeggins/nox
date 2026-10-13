@@ -55,6 +55,8 @@ pub mod vision;
 // T-terminal reader — voice queries about portfolio/quotes (read-only)
 pub mod terminal;
 pub mod shutdown;
+pub mod address;
+pub mod features;   // выключатели функций («Фичи» в настройках), общий файл с Python-службами
 
 pub mod audio_buffer;
 

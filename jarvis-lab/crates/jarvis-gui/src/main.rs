@@ -166,21 +166,12 @@ fn main() {
             tauri_commands::magellan_pulse,
             tauri_commands::tts_speed_get,
             tauri_commands::tts_speed_set,
+            tauri_commands::profile_get,
+            tauri_commands::profile_save,
 
-            // Telegram
-            tauri_commands::tg_health,
-            tauri_commands::tg_dialogs,
-            tauri_commands::tg_chats_set,
-            tauri_commands::tg_filter_get,
-            tauri_commands::tg_filter_add,
-            tauri_commands::tg_filter_remove,
-            tauri_commands::tg_filter_mode,
-            tauri_commands::tg_creds_set,
-            tauri_commands::tg_mon,
-            tauri_commands::tg_login,
-            tauri_commands::tg_public_get,
-            tauri_commands::tg_public_add,
-            tauri_commands::tg_public_remove,
+            // «Фичи»: выключатели функций
+            tauri_commands::features_get,
+            tauri_commands::features_set,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -109,7 +109,9 @@ def list_public():
                     "tab": w.get("tab", ""), "event": w.get("event", ""),
                     "branches": w.get("branches", []), "last_result": w.get("last_result", ""),
                     "kind": w.get("kind", ""), "bank": w.get("bank", ""), "date": w.get("date", ""),
-                    "from": w.get("from", ""), "rate_now": w.get("rate_now")})
+                    "from": w.get("from", ""), "rate_now": w.get("rate_now"),
+                    "quiet": w.get("quiet", 5 if w.get("kind") == "rate" else 0),
+                    "strict": w.get("strict", w.get("kind") == "rate")})
     return {"watchers": out}
 
 def get(wid):
@@ -160,9 +162,9 @@ def upsert(data):
         kws = ["ставка"]          # для подписи: тип «ставка» ловит решения парсером, не словами
     if not kws:
         return {"ok": False, "text": "Укажите, что ловить (ключевые слова)."}
-    bank = data.get("bank") if data.get("bank") in ("cbr", "fed") else ""
+    bank = data.get("bank") if data.get("bank") in ("cbr", "fed", "minfin") else ""
     if kind and not bank:
-        return {"ok": False, "text": "Для решения по ставке выберите банк: ЦБ или ФРС."}
+        return {"ok": False, "text": "Для решения по времени выберите источник: ЦБ, ФРС или Минфин."}
     try:
         rate_now = float(str(data.get("rate_now")).replace(",", ".")) if str(data.get("rate_now") or "").strip() else None
     except ValueError:
@@ -174,18 +176,24 @@ def upsert(data):
         return {"ok": False, "text": "Время «с» — в формате ЧЧ:ММ:СС (МСК), например 13:30:00."}
     if t_from and len(t_from) == 7:
         t_from = "0" + t_from
-    if kind and not t_from:
-        t_from = "13:30:00" if bank == "cbr" else "21:00:00"
     date = (data.get("date") or "").strip()
     if date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
         return {"ok": False, "text": "Дата — в формате ГГГГ-ММ-ДД."}
+    if kind and not t_from:
+        t_from = default_time(bank, date)
+    try:
+        quiet = max(0, min(60, int(str(data.get("quiet", 5 if kind else 0)).strip() or 0)))
+    except ValueError:
+        quiet = 5 if kind else 0
+    strict = bool(data.get("strict", True)) if kind else False
     fields = {"name": (data.get("name") or " ".join(kws)).strip(), "keywords": kws,
               "source": data.get("source") or "all", "brain": data.get("brain") or "",
               "scenario_id": data.get("scenario_id") or "", "until": (data.get("until") or "").strip(),
               "once": bool(data.get("once", True)), "tab": (data.get("tab") or "").strip(),
               "event": (data.get("event") or "").strip(), "branches": _clean_branches(data.get("branches")),
               "group": (data.get("group") or "").strip(), "delete_after": bool(data.get("delete_after", False)),
-              "kind": kind, "bank": bank, "date": date, "from": t_from, "rate_now": rate_now}
+              "kind": kind, "bank": bank, "date": date, "from": t_from, "rate_now": rate_now,
+              "quiet": quiet, "strict": strict}
     if fields["branches"] and not fields["tab"]:
         fields["tab"] = DEFAULT_TAB
     w = next((x for x in d["watchers"] if str(x.get("id")) == str(data.get("id") or "")), None)
@@ -275,6 +283,10 @@ _RATE_HINT = (
     "{\"move\":\"cut\",\"bp\":50,\"bp_mode\":\"atleast\",\"orders\":[{\"name\":\"сбер\",\"side\":\"buy\",\"lots\":null,\"price\":null}]},"
     "{\"move\":\"cut\",\"bp\":25,\"bp_mode\":\"exact\",\"orders\":[]},"
     "{\"move\":\"hold\",\"bp\":null,\"bp_mode\":null,\"orders\":[{\"name\":\"сбер\",\"side\":\"sell\",\"lots\":null,\"price\":null}]}]}\n"
+    "МИНФИН (покупка/продажа валюты по бюджетному правилу, 3-й рабочий день месяца 12:00): bank \"minfin\", "
+    "ветки — \"move\":\"buy|sell|pause\", \"amount\": млрд руб В ДЕНЬ без знака или null, \"bp_mode\": atleast|exact|under|null. "
+    "«Минфин: покупки больше 10 млрд в день — купи X, пауза — ничего, продажи — продай X» => "
+    "{\"move\":\"buy\",\"amount\":10,\"bp_mode\":\"atleast\",...}, {\"move\":\"pause\",...orders:[]}, {\"move\":\"sell\",\"amount\":null,...}\n"
     "«ФРС: снизят — купи Сбер, сохранят или повысят — продай Сбер» => ветки: "
     "{\"move\":\"cut\",\"bp\":null,...buy...}, {\"move\":\"hold_or_hike\",\"bp\":null,...sell...}")
 
@@ -288,6 +300,21 @@ def _rate_move_to_branch(b):
     except (TypeError, ValueError):
         bp = None
     mode = str(b.get("bp_mode") or "").lower()
+    if move in ("buy", "sell", "pause"):          # Минфин: объём в день, млрд руб (покупка +, продажа −)
+        try:
+            amt = abs(float(b.get("amount"))) if b.get("amount") not in (None, "") else None
+        except (TypeError, ValueError):
+            amt = None
+        if move == "pause":
+            return {"type": "range", "min": 0, "max": 0}
+        sgn = 1 if move == "buy" else -1
+        if not amt:
+            return {"type": "gt", "min": 0, "max": None} if sgn > 0 else {"type": "lt", "min": None, "max": 0}
+        if mode == "exact":
+            return {"type": "range", "min": sgn * amt, "max": sgn * amt}
+        if mode == "under":
+            return ({"type": "range", "min": 0.01, "max": amt} if sgn > 0 else {"type": "range", "min": -amt, "max": -0.01})
+        return {"type": "ge", "min": amt, "max": None} if sgn > 0 else {"type": "le", "min": None, "max": -amt}
     if move == "hold":
         return {"type": "range", "min": 0, "max": 0}
     if move == "cut_or_hold":
@@ -420,7 +447,7 @@ def _brain_parse(text):
                 branches.append({**conv, "orders": orders})
             else:
                 branches.append({"type": b.get("type"), "min": b.get("min"), "max": b.get("max"), "orders": orders})
-        rate = {"kind": "rate", "bank": j.get("bank") if j.get("bank") in ("cbr", "fed") else "",
+        rate = {"kind": "rate", "bank": j.get("bank") if j.get("bank") in ("cbr", "fed", "minfin") else "",
                 "date": str(j.get("date") or "").strip(), "from": str(j.get("from") or "").strip()} \
             if j.get("kind") == "rate" else {}
         return {**rate, "keywords": kws, "until": (j.get("until") or "").strip(),
@@ -613,11 +640,75 @@ def _rate_branch(branches, bp):
     return next((b for b in branches if b.get("type") != "none" and nox_scenarios._branch_match(b, bp)), None)
 
 
-def _fire_rate(w, news_text, meta=None):
-    """Решение по ставке: правила (nox_rates) -> изменение в б.п. -> ветка -> нажать. Без мозга, ~0.1 мс."""
+BANK_RU = {"cbr": "Банк России", "fed": "ФРС", "minfin": "Минфин"}
+BANK_WAIT = {"cbr": "решение Банка России", "fed": "решение ФРС", "minfin": "сообщение Минфина о покупке валюты"}
+
+
+def default_time(bank, date=""):
+    """Время выхода по умолчанию (МСК): ЦБ 13:30; Минфин 12:00 (третий рабочий день месяца);
+    ФРС — 14:00 по Нью-Йорку: 21:00 МСК летом (EDT) и 22:00 зимой (EST, с первого воскресенья ноября
+    до второго воскресенья марта)."""
+    if bank == "cbr":
+        return "13:30:00"
+    if bank == "minfin":
+        return "12:00:00"
+    import datetime as dt
+    try:
+        d = dt.date.fromisoformat(date) if date else _now().date()
+    except ValueError:
+        d = _now().date()
+    def nth_sunday(y, m, n):
+        first = dt.date(y, m, 1)
+        return first + dt.timedelta(days=(6 - first.weekday()) % 7 + 7 * (n - 1))
+    summer = nth_sunday(d.year, 3, 2) <= d < nth_sunday(d.year, 11, 1)
+    return "21:00:00" if summer else "22:00:00"
+
+
+def _fire_minfin(w, news_text, meta=None):
+    """Валютные операции Минфина: правила -> объём в день (млрд руб; покупка +, продажа −) -> ветка."""
     import nox_rates
+    body = (meta or {}).get("body") or ""
+    full = f"{news_text} {body}".strip()
+    if w.get("strict", True) and not nox_rates.official(full, "minfin"):
+        return "Минфин: не официальное сообщение — жду."
+    d = nox_rates.parse_minfin(full)
+    if not d:
+        return "Минфин: не решение по ставке — жду."
+    what = nox_rates.describe_minfin(d)
+    if d.get("daily") is None:
+        return f"{what}: размер не назван — жду следующий заголовок."
+    val = d["daily"]
+    branches = w.get("branches") or []
+    b = _rate_branch(branches, val)
+    if not b:
+        nox_scenarios._log(f"МИНФИН «{w.get('name')}»: {what} ({val:+g}) — ветки нет")
+        return f"{what} — подходящей ветки нет, ничего не нажимаю."
+    i = branches.index(b) + 1
+    if not b.get("orders"):
+        return f"{what} — ветка {i}, ничего не делаем."
+    if not EXECUTOR:
+        return f"{what} — ветка {i}, но исполнитель терминала не подключён."
+    res = EXECUTOR(w, b, news_text, meta=meta) or {}
+    nox_scenarios._log(f"МИНФИН «{w.get('name')}»: {what} ({val:+g}) -> ветка {i}: {res.get('text', '')}")
+    return f"{what} — ветка {i}. {res.get('text', '')}"
+
+
+def _fire_rate(w, news_text, meta=None):
+    """Решение по ставке: правила (nox_rates) -> изменение в б.п. -> ветка -> нажать. Без мозга, ~0.1 мс.
+    strict (по умолчанию) — только официальная формулировка: «Банк России принял решение…»,
+    «The Committee decided to…» / «ФРС приняла решение…»; пересказы агентств пропускаются."""
+    import nox_rates
+    if w.get("bank") == "minfin":
+        return _fire_minfin(w, news_text, meta)
     bank_ru = {"cbr": "ЦБ", "fed": "ФРС"}.get(w.get("bank"), "банк")
+    body = (meta or {}).get("body") or ""
+    if w.get("strict", True) and not nox_rates.official(f"{news_text} {body}", w.get("bank")):
+        return f"{bank_ru}: не решение по ставке — жду официальную формулировку."
     d = nox_rates.parse_decision(news_text, rate_now=w.get("rate_now"))
+    if (not d or d.get("bank") != w.get("bank")) and body:
+        # заголовок обрезан («Банк России принял решение...»), суть — в теле:
+        # «Совет директоров Банка России … принял решение снизить ключевую ставку на 50 б.п., до 13,50% годовых»
+        d = nox_rates.parse_decision(f"{news_text} {body}", rate_now=w.get("rate_now"))
     if not d or d.get("bank") != w.get("bank"):
         return f"{bank_ru}: не решение по ставке — жду."
     what = nox_rates.describe(d)
@@ -639,6 +730,37 @@ def _fire_rate(w, news_text, meta=None):
     res = EXECUTOR(w, b, news_text, meta=meta) or {}
     nox_scenarios._log(f"СТАВКА «{w.get('name')}»: {what} ({bp:+d} б.п.) -> ветка {i}: {res.get('text', '')}")
     return f"{what} — ветка {i}. {res.get('text', '')}"
+
+
+QUIET_AFTER = 15 * 60    # с: если решение так и не вышло — тишина снимается через 15 мин после времени выхода
+
+
+def focus_state():
+    """Режим тишины: включённый наблюдатель по времени (ставка ЦБ/ФРС, Минфин) — за `quiet` минут до выхода
+    и до срабатывания (или +15 мин). -> None | {"wid","reason","until"(unix),"at"("ЧЧ:ММ")}"""
+    try:
+        now = _now()
+        today = now.strftime("%Y-%m-%d")
+        secs = now.hour * 3600 + now.minute * 60 + now.second
+        best = None
+        for w in load()["watchers"]:
+            if not (w.get("enabled") and w.get("kind") == "rate" and w.get("from")):
+                continue
+            q = int(w.get("quiet", 5) or 0)
+            if q <= 0 or (w.get("date") and w["date"] != today):
+                continue
+            if w.get("once") and w.get("fired_day") == today:
+                continue
+            h, m, s = (int(x) for x in w["from"].split(":"))
+            t0 = h * 3600 + m * 60 + s
+            if t0 - q * 60 <= secs <= t0 + QUIET_AFTER:
+                cand = {"wid": w["id"], "until": time.time() + (t0 + QUIET_AFTER - secs),
+                        "reason": BANK_WAIT.get(w.get("bank"), "решение"), "at": w["from"][:5]}
+                if not best or cand["until"] < best["until"]:
+                    best = cand
+        return best
+    except Exception:
+        return None
 
 
 def fast_window():
@@ -666,12 +788,35 @@ def dry_run(wid, value):
     w = get(wid)
     if not w:
         return {"ok": False, "text": "Наблюдатель не найден."}
+    if w.get("kind") == "rate" and w.get("bank") == "minfin":
+        import nox_rates
+        txt = str(value or "").strip()
+        if re.fullmatch(r"[-+−]?\s*\d+(?:[.,]\d+)?", txt):
+            val, what = float(txt.replace("−", "-").replace(" ", "").replace(",", ".")), ""
+        else:
+            if w.get("strict", True) and not nox_rates.official(txt, "minfin"):
+                return {"ok": True, "text": "Не официальное сообщение Минфина — в строгом режиме наблюдатель его пропустит."}
+            d = nox_rates.parse_minfin(txt)
+            if not d or d.get("daily") is None:
+                return {"ok": True, "text": "Не вижу объёма операций Минфина — наблюдатель подождёт следующий заголовок."}
+            val, what = d["daily"], nox_rates.describe_minfin(d) + ". "
+        b = _rate_branch(w.get("branches") or [], val)
+        if not b:
+            return {"ok": True, "text": f"{what}{val:+g} млрд в день: подходящей ветки нет."}
+        i = (w.get("branches") or []).index(b) + 1
+        if not b.get("orders"):
+            return {"ok": True, "branch": i, "text": f"{what}{val:+g} млрд в день → ветка {i}: ничего не делать."}
+        res = EXECUTOR(w, b, "", dry=True) if EXECUTOR else {"text": "исполнитель не подключён"}
+        return {"ok": True, "branch": i, "text": f"{what}{val:+g} млрд в день → ветка {i}. {(res or {}).get('text', '')}"}
     if w.get("kind") == "rate":
         import nox_rates
         txt = str(value or "").strip()
         if re.fullmatch(r"[-+−]?\s*\d+(?:[.,]\d+)?", txt):
             bp, what = int(round(float(txt.replace("−", "-").replace(" ", "").replace(",", ".")))), ""
         else:
+            if w.get("strict", True) and not nox_rates.official(txt, w.get("bank")):
+                return {"ok": True, "text": "Это пересказ, а не официальная формулировка — в строгом режиме наблюдатель "
+                                            "его пропустит и будет ждать «Банк России принял решение…» / «The Committee decided…»."}
             d = nox_rates.parse_decision(txt, rate_now=w.get("rate_now"))
             if not d or d.get("bank") != w.get("bank"):
                 return {"ok": True, "text": "Не решение по ставке этого банка — наблюдатель пропустит заголовок."}
@@ -721,7 +866,8 @@ def _fire(w, news_text, meta=None):
             pass
         # прогноз/анонс/число не названо — решения ещё не было: продолжаем ждать (не выключаемся)
         return not any(k in report for k in ("прогноз или анонс", "не названо", "ветки нет",
-                                              "не решение по ставке", "размер не назван"))
+                                              "не решение по ставке", "размер не назван",
+                                              "не официальное сообщение"))
     # обычный наблюдатель (без веток): озвучить новость + открыть/подсветить стакан сценария
     try:
         nox_scenarios._announce(short)
@@ -751,7 +897,17 @@ def _stem(w):
         r = r[:-1]
     return r
 
+_on_news_lock = threading.Lock()
+
+
 def on_news(items, source="trading"):
+    """Строго по очереди: лента и официальные сайты (cbr.ru / federalreserve.gov) могут принести одно решение
+    почти одновременно — без замка оба вызова прочитали бы «наблюдатель включён» и дали ДВЕ сделки."""
+    with _on_news_lock:
+        return _on_news(items, source)
+
+
+def _on_news(items, source="trading"):
     """items: [{text, body, tickers, seen, _detect}] — свежие новости (новые первыми). Проверяет наблюдателей.
     Новости разбираются В ПОРЯДКЕ ВЫХОДА (старые -> новые): «кто первым совпал — тот и сработал».
     Группа (`group`): первый сработавший наблюдатель выключает остальных из своей группы."""
@@ -786,8 +942,10 @@ def on_news(items, source="trading"):
         for w in d["watchers"]:
             if not eligible(w):
                 continue
-            if w.get("kind") == "rate":   # решение по ставке: каждую новость в окне — в парсер (слова не нужны)
-                if not re.search(r"ставк|\brates?\b|target range|fed funds", blob):
+            if w.get("kind") == "rate":   # решение по времени: каждую новость в окне — в парсер (слова не нужны)
+                pre = (r"минфин|нефтегазов|валют|юан|золот" if w.get("bank") == "minfin"
+                       else r"ставк|\brates?\b|target range|fed funds|приня\w* решени|decided")
+                if not re.search(pre, blob):
                     continue
             else:
                 roots = [_stem(k) for k in w["keywords"]]

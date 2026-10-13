@@ -10,18 +10,16 @@ pub fn stop_nox() -> Result<(), String> {
     jarvis_core::shutdown::spawn_full_stop()
 }
 
-/// Разовый вход в Telegram: открыть ВИДИМОЕ окно консоли для ввода телефона и кода
-/// (это единственное место, где консоль нужна — для интерактивного ввода).
+/// «Фичи»: записанные выключатели функций (JSON-объект; нет ключа — функция включена).
 #[tauri::command]
-pub fn tg_login() -> Result<(), String> {
-    let mut cmd = std::process::Command::new("cmd");
-    cmd.args([
-        "/c", "start", "Nox: vhod v Telegram",
-        r"C:\jarvis-voice\.venv\Scripts\python.exe",
-        r"C:\jarvis-voice\tg_login.py",
-    ]);
-    cmd.spawn().map_err(|e| e.to_string())?;
-    Ok(())
+pub fn features_get() -> String {
+    jarvis_core::features::get_json()
+}
+
+/// «Фичи»: включить/выключить функцию. Службы watchdog гасит/поднимает в течение ~20 с.
+#[tauri::command]
+pub fn features_set(key: String, on: bool) -> Result<(), String> {
+    jarvis_core::features::set(&key, on)
 }
 
 /// Показать/скрыть оверлей-шар (окно label="overlay").

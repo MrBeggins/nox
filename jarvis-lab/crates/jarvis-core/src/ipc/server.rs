@@ -32,6 +32,11 @@ pub fn init() -> broadcast::Sender<IpcEvent> {
 
 // Send event to all connected clients
 pub fn send(event: IpcEvent) {
+    // лента: «сэр» → имя из профиля (как и в озвучке)
+    let event = match event {
+        IpcEvent::AssistantReply { text } => IpcEvent::AssistantReply { text: crate::address::personalize(&text) },
+        other => other,
+    };
     if let Some(tx) = BROADCAST_TX.get() {
         match tx.send(event.clone()) {
             Ok(n) => {

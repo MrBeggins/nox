@@ -111,6 +111,7 @@ fn main() -> Result<(), String> {
     // восстановить состояние Пульса: выключенный микрофон / «не беспокоить» переживают перезапуск
     MUTED.store(settings.lock().mic_muted, Ordering::SeqCst);
     DND.store(settings.lock().dnd, Ordering::SeqCst);
+    jarvis_core::address::set_name(&settings.lock().user_name);   // обращение вместо «сэр»
     info!("Pulse state: mic_muted={} dnd={}", settings.lock().mic_muted, settings.lock().dnd);
 
     // init voices
@@ -229,6 +230,7 @@ fn main() -> Result<(), String> {
                     let s = db.read();
                     MUTED.store(s.mic_muted, Ordering::SeqCst);
                     DND.store(s.dnd, Ordering::SeqCst);
+                    jarvis_core::address::set_name(&s.user_name);
                 }
             }
             IpcAction::AbortSpeech => {

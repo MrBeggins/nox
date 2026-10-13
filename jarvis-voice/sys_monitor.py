@@ -82,6 +82,20 @@ def _sample():
     return cpu, ram, gpu
 
 # ------------------------------------------------------------------ монитор нагрузок
+def _feature_on(key):
+    try:
+        import nox_features
+        return nox_features.enabled(key)
+    except Exception:
+        return True
+
+def _focus():
+    try:
+        import nox_features
+        return nox_features.focus_active()
+    except Exception:
+        return False
+
 def _mon_loop():
     psutil.cpu_percent(interval=None)                 # прогрев счётчика
     for p in psutil.process_iter(["cpu_percent"]):    # прогрев по процессам
@@ -97,7 +111,7 @@ def _mon_loop():
             hi_ram = hi_ram + 1 if ram >= cfg["ram_thr"] else 0
             hi_gpu = hi_gpu + 1 if (gpu and gpu["util"] >= cfg["gpu_thr"]) else 0
             now = time.time()
-            if cfg.get("mon", True):
+            if cfg.get("mon", True) and _feature_on("pc_alerts") and not _focus():   # «Фичи» + режим тишины
                 if hi_cpu >= cfg["sustain"] and now - last_alert["cpu"] > cfg["cooldown"]:
                     last_alert["cpu"] = now
                     tp = _top_proc(1); who = tp[0][1] if tp else ""

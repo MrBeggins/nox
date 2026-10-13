@@ -33,7 +33,10 @@ fn main_loop(text_cmd_rx: Receiver<String>, rt: &tokio::runtime::Runtime) -> Res
     // 1.5 seconds = 1.5 * (16000 / 512) ≈ 47 frames
     let silence_threshold: u32 = ((1.5 * sample_rate as f32) / frame_length as f32) as u32;
     
-    voices::play_greet();
+    // приветствие при запуске — выключается во вкладке «Фичи»
+    if jarvis_core::features::enabled("greeting") {
+        voices::play_greet();
+    }
 
     match recorder::start_recording() {
         Ok(_) => info!("Recording started. Microphone: {}", 
