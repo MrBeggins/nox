@@ -25,6 +25,7 @@ GITREPO = r"C:\nox"
 SRC_OUT = os.path.join(ROOT, "source")
 PAYLOAD = os.path.join(ROOT, "payload")
 DIST    = os.path.join(ROOT, "dist")
+DIST_TEST = os.path.join(ROOT, "dist-test")
 INST    = os.path.join(ROOT, "installer")
 RELEASE = os.path.join(LAB, "target", "release")
 RELEASE_ALT = os.path.join(LAB, "target-dist", "release")
@@ -230,8 +231,16 @@ def check():
     if not isinstance(db.get("api_keys"), dict):
         bad.append("app.db.template: api_keys должен быть объектом {picovoice, openai}")
     for k in ("setup-nox.ps1", "stop-nox.ps1"):
-        if not open(os.path.join(INST, k), "rb").read().startswith(b"\xef\xbb\xbf"):
+        raw = open(os.path.join(INST, k), "rb").read()
+        if not raw.startswith(b"\xef\xbb\xbf"):
             bad.append(f"{k} без BOM — PowerShell 5.1 испортит кириллицу")
+        elif raw.startswith(b"\xef\xbb\xbf" * 2):
+            bad.append(f"{k}: двойной BOM — PowerShell не разберёт скрипт")
+        ps = ("$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile('"
+              + os.path.join(INST, k) + "',[ref]$null,[ref]$e); $e.Count")
+        n = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True).stdout.strip()
+        if n != "0":
+            bad.append(f"{k}: ошибок разбора PowerShell — {n}")
     if bad:
         log("СТОП, найдено:")
         for b in bad:
@@ -248,16 +257,19 @@ def find_iscc():
     return shutil.which("iscc")
 
 
-def compile_installer(version):
-    log("\n=== 4. Компиляция установщика (Inno Setup) ===")
+def compile_installer(version, test=False):
+    log("\n=== 4. Компиляция установщика (Inno Setup)" + (" — проверочная сборка" if test else "") + " ===")
     iscc = find_iscc()
     if not iscc:
         log("Inno Setup 6 не найден: winget install JRSoftware.InnoSetup"); sys.exit(3)
-    os.makedirs(DIST, exist_ok=True)
-    r = subprocess.run([iscc, f"/DAppVersion={version}", "/Qp", os.path.join(INST, "Nox.iss")])
+    # проверочная сборка ставится в C:\noxtest (рядом с рабочим Nox, не трогая его) — только для проверки, не раздавать
+    out = DIST_TEST if test else DIST
+    os.makedirs(out, exist_ok=True)
+    extra = ["/DTestBuild", r"/DRoot=C:\noxtest", "/O" + out] if test else []
+    r = subprocess.run([iscc, f"/DAppVersion={version}", "/Qp"] + extra + [os.path.join(INST, "Nox.iss")])
     if r.returncode != 0:
         log("ошибка компиляции"); sys.exit(r.returncode)
-    exe = os.path.join(DIST, f"Nox-Setup-{version}.exe")
+    exe = os.path.join(out, f"Nox-Setup-{'TEST-' if test else ''}{version}.exe")
     h = hashlib.sha256()
     with open(exe, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
@@ -275,9 +287,12 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", default=datetime.date.today().strftime("%Y.%m.%d"))
     ap.add_argument("--no-compile", action="store_true")
+    ap.add_argument("--test", action="store_true", help="ещё и проверочная сборка в dist-test (ставится в C:\\noxtest)")
     a = ap.parse_args()
     build_source()
     build_payload()
     check()
     if not a.no_compile:
         compile_installer(a.version)
+        if a.test:
+            compile_installer(a.version, test=True)

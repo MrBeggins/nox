@@ -2,3 +2,8 @@
 payload/
 dist/
 __pycache__/
+dist-test/
+tests/results/
+release_upload.log
+build.log
+gui_build.log

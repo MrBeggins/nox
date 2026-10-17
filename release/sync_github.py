@@ -37,7 +37,8 @@ NEW_FILES = [
     "jarvis-lab/frontend/src/routes/memory/index.svelte",
 ]
 # инструменты раздачи -> release/ в репозитории
-RELEASE_FILES = ["build.py", "sync_github.py", "README.md", "Собрать-установщик.cmd", ".gitignore"]
+RELEASE_FILES = ["build.py", "sync_github.py", "publish_release.py", "README.md", "Собрать-установщик.cmd", ".gitignore",
+                 "tests/test_install.ps1", "tests/verify_install.py", "tests/test_uninstall.ps1"]
 # старый установщик, заменён release/installer
 REMOVE = ["installer/install.ps1", "installer/Установить-Nox.bat", "installer/app.db.template", "installer/README.md"]
 

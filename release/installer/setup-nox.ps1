@@ -8,15 +8,18 @@ param(
     [switch]$Ollama,    # локальный мозг Ollama + qwen2.5:3b
     [switch]$Yandex,    # Яндекс.Браузер (окно Т-Терминала)
     [switch]$F5,        # голос-клон Джарвиса F5-TTS (видеокарта NVIDIA)
-    [switch]$Xtts       # голос-клон Джарвиса XTTS v2 (видеокарта NVIDIA)
+    [switch]$Xtts,      # голос-клон Джарвиса XTTS v2 (видеокарта NVIDIA)
+    [switch]$NoPause,   # не ждать Enter в конце (тихая установка /VERYSILENT)
+    [string]$Root = "C:\",          # корень установки (меняется только для проверочной сборки)
+    [string]$AppDataDir = ""         # папка настроек вместо %APPDATA%\com.priler.jarvis (проверочная сборка)
 )
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $Host.UI.RawUI.WindowTitle = "Nox — установка компонентов"
 
-$VO   = "C:\jarvis-voice"
-$LAB  = "C:\jarvis-lab"
+$VO   = Join-Path $Root "jarvis-voice"
+$LAB  = Join-Path $Root "jarvis-lab"
 $LOG  = "$VO\install.log"
 $TMP  = Join-Path $env:TEMP "nox-setup"
 $VPY  = "$VO\.venv\Scripts\python.exe"
@@ -301,7 +304,7 @@ if ($Yandex) {
 
 # --- 7. Стартовые настройки ---------------------------------------------------
 Step "Настройки"
-$APPDIR = Join-Path $env:APPDATA "com.priler.jarvis"
+$APPDIR = if ($AppDataDir) { $AppDataDir } else { Join-Path $env:APPDATA "com.priler.jarvis" }
 New-Item -ItemType Directory -Force $APPDIR | Out-Null
 if (-not (Test-Path "$APPDIR\app.db")) {
     Copy-Item "$VO\installer\app.db.template" "$APPDIR\app.db" -Force
@@ -326,7 +329,7 @@ if ($problems.Count -eq 0) {
     Log "Установка завершена с замечаниями:" "Yellow"
     foreach ($p in $problems) { Write-Host " - $p" -ForegroundColor Yellow }
     Write-Host ""
-    Write-Host "Исправьте и запустите «Nox — починить установку» из меню Пуск. Нажмите Enter..." -ForegroundColor Yellow
-    [void](Read-Host)
+    Write-Host "Исправьте и запустите «Nox — починить установку» из меню Пуск." -ForegroundColor Yellow
+    if (-not $NoPause) { Write-Host "Нажмите Enter..." -ForegroundColor Yellow; [void](Read-Host) }
     exit 1
 }
