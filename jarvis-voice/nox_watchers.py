@@ -117,7 +117,7 @@ def list_public():
 def get(wid):
     return next((w for w in load()["watchers"] if str(w.get("id")) == str(wid)), None)
 
-_TYPES = {"gt", "ge", "lt", "le", "range", "none", "any"}
+_TYPES = {"gt", "ge", "lt", "le", "range", "none", "any", "words"}
 
 def _clean_branches(branches):
     """Нормализовать ветки из GUI/голоса: типы, числа, заявки (тикер в верхнем регистре, № >= 1, сторона)."""
@@ -134,11 +134,16 @@ def _clean_branches(branches):
             side = "sell" if str(o.get("side")).lower() in ("sell", "продать", "short", "шорт") else "buy"
             if cs:   # стакан CScalp: только тикер и сторона (по рынку, объём — в стакане)
                 tk = re.sub(r"^([A-Z]+)-?(\d{1,2}\.\d{2})$", r"\1-\2", tk)   # «SILVM 3.27» -> SILVM-3.27
-                orders.append({"ticker": tk, "n": 1, "side": side, "lots": None, "price": None, "venue": "cscalp"})
+                # n — № стакана с этим тикером в окне CScalp (два MIX на вкладке «нокс» — №1 и №2)
+                n_cs = max(1, int(o.get("n") or 1)) if str(o.get("n") or "1").strip().isdigit() else 1
+                orders.append({"ticker": tk, "n": n_cs, "side": side, "lots": None, "price": None, "venue": "cscalp"})
                 continue
-            orders.append({"ticker": tk, "n": max(1, int(o.get("n") or 1)), "side": side,
-                           "lots": (int(o["lots"]) if str(o.get("lots") or "").strip().isdigit() else None),
-                           "price": num(o.get("price"))})
+            row_o = {"ticker": tk, "n": max(1, int(o.get("n") or 1)), "side": side,
+                     "lots": (int(o["lots"]) if str(o.get("lots") or "").strip().isdigit() else None),
+                     "price": num(o.get("price"))}
+            if o.get("wid"):               # id своего виджета «Заявка» в терминале (объём/тип/цена — в нём)
+                row_o["wid"] = str(o["wid"])
+            orders.append(row_o)
         mn, mx = num(b.get("min")), num(b.get("max"))
         # порог в «правильное» поле: больше/не меньше -> min, меньше/не больше -> max (мозг их путает)
         if t in ("gt", "ge") and mn is None and mx is not None:
@@ -147,7 +152,12 @@ def _clean_branches(branches):
             mn, mx = None, mn
         if t == "range" and mn is not None and mx is not None and mn > mx:
             mn, mx = mx, mn
-        out.append({"type": t, "min": mn, "max": mx, "orders": orders})
+        row = {"type": t, "min": mn, "max": mx, "orders": orders}
+        if t == "words":   # ветка по словам: есть любое из words и нет ни одного из except
+            lst = lambda v: [str(x).lower().strip() for x in (v if isinstance(v, list) else re.split(r"[,;]+", str(v or "")))
+                             if str(x).strip()]
+            row.update(words=lst(b.get("words")), **{"except": lst(b.get("except"))})
+        out.append(row)
     return out
 
 def upsert(data):
@@ -198,6 +208,15 @@ def upsert(data):
         fields["tab"] = DEFAULT_TAB
     w = next((x for x in d["watchers"] if str(x.get("id")) == str(data.get("id") or "")), None)
     if w:
+        # окно не знает id виджетов — перенести из прежней версии заявки (та же ветка и позиция, тот же тикер)
+        for bi, b in enumerate(fields["branches"]):
+            for oi, o in enumerate(b.get("orders") or []):
+                try:
+                    old = w["branches"][bi]["orders"][oi]
+                except Exception:
+                    continue
+                if not o.get("wid") and old.get("wid") and old.get("ticker") == o.get("ticker"):
+                    o["wid"] = old["wid"]
         w.update(fields)
     else:
         w = {"id": uuid.uuid4().hex[:8], "enabled": data.get("enabled", True) is not False, "created": time.time(),
@@ -579,6 +598,168 @@ def add_from_voice(text):
     txt += (f". Сработает сценарий «{sname}»." if sname else ". Только озвучу новость.")
     return {"ok": True, "id": w["id"], "text": txt}
 
+# ------------------------------------------------------------------ правка голосом
+# «выключи наблюдатель санкции», «включи сценарий газпром», «удали наблюдатель тест»,
+# «поменяй объём в сценарии газпром на 10 лотов», «поставь цену 545 в наблюдателе пик», «переведи … на рынок»,
+# «переименуй наблюдатель тест в санкции», «переведи наблюдатель X на рынок». Числа словами переводятся в цифры (nox_numwords).
+def _name_score(t, name):
+    toks = [x[:5] for x in re.findall(r"[a-zа-я0-9]{3,}", (name or "").lower().replace("ё", "е"))
+            if x not in ("наблюдатель", "сценарий", "тест")] or [x[:5] for x in re.findall(r"[a-zа-я0-9]{3,}", name.lower())]
+    if not toks:
+        return 0.0
+    words = [x[:5] for x in re.findall(r"[a-zа-я0-9]{3,}", t)]
+    return sum(1 for x in toks if x in words) / len(toks)
+
+
+def _pick(t):
+    """Наблюдатель (или сценарий «стакан по новости»), о котором речь: (вид, объект) | (None, подсказка)."""
+    pool = [("w", w) for w in load()["watchers"]]
+    try:
+        pool += [("s", s) for s in nox_scenarios.load().get("scenarios", [])]
+    except Exception:
+        pass
+    if not pool:
+        return None, "Наблюдателей и сценариев пока нет, сэр."
+    want_s = "сценари" in t and "наблюдател" not in t
+    sc = sorted(((_name_score(t, o.get("name", "")) + (0.01 if (k == "s") == want_s else 0), k, o) for k, o in pool),
+                key=lambda r: -r[0])
+    best = sc[0]
+    if best[0] < 0.5 or (len(sc) > 1 and abs(sc[1][0] - best[0]) < 0.02):
+        names = ", ".join(f"«{o.get('name')}»" for _s, _k, o in sc[:5])
+        return None, f"Какой именно, сэр? Есть: {names}."
+    return best[1], best[2]
+
+
+def edit_from_voice(text):
+    try:
+        import nox_numwords
+        t = nox_numwords.digits((text or "").lower())
+    except Exception:
+        t = (text or "").lower()
+    t = t.replace("ё", "е")
+    kind, obj = _pick(t)
+    if kind is None:
+        return {"ok": False, "text": obj}
+    name = obj.get("name", "")
+    label = "Сценарий" if kind == "s" else "Наблюдатель"
+    if kind == "s":                                   # сценарии «стакан по новости»: вкл / выкл / удалить
+        d = nox_scenarios.load()
+        lst = d.get("scenarios", [])
+        if re.search(r"(?<![а-я])удали", t):
+            d["scenarios"] = [s for s in lst if s.get("id") != obj.get("id")]; nox_scenarios.save(d)
+            return {"ok": True, "text": f"{label} «{name}» удалён, сэр."}
+        on = None
+        if re.search(r"(?<![а-я])(выключи|отключи)", t):
+            on = False
+        elif re.search(r"(?<![а-я])включи", t):
+            on = True
+        if on is None:
+            return {"ok": False, "text": f"Сценарий «{name}» голосом можно включить, выключить или удалить, сэр. "
+                                         "Остальное — на странице «Наблюдатели»."}
+        for s in lst:
+            if s.get("id") == obj.get("id"):
+                s["enabled"] = on
+        nox_scenarios.save(d)
+        return {"ok": True, "text": f"{label} «{name}» {'включён' if on else 'выключен'}, сэр."}
+
+    w = obj
+    if re.search(r"(?<![а-я])удали", t):
+        remove(w["id"])
+        return {"ok": True, "text": f"{label} «{name}» удалён, сэр."}
+    if re.search(r"(?<![а-я])(выключи|отключи)", t):
+        dd = load()
+        for x in dd["watchers"]:
+            if x["id"] == w["id"]:
+                x["enabled"] = False
+        save(dd)
+        return {"ok": True, "text": f"{label} «{name}» выключен, сэр."}
+    if re.search(r"(?<![а-я])включи", t):
+        dd = load()
+        for x in dd["watchers"]:
+            if x["id"] == w["id"]:
+                x["enabled"] = True
+                if x.get("once"):
+                    x["fired_day"] = ""
+        save(dd)
+        br = w.get("branches") or []
+        tail = f" При новости: {_speak_branches(br)}." if br else ""
+        return {"ok": True, "text": f"{label} «{name}» включён, сэр.{tail}"}
+    m = re.search(r"переименуй\w*.*?\sв\s+(.+)$", t)
+    if m:
+        new = m.group(1).strip(" .,!?«»\"")
+        r = upsert({**w, "name": new})
+        return {"ok": r.get("ok"), "text": f"{label} «{name}» теперь называется «{new}», сэр." if r.get("ok") else r["text"]}
+
+    # объём / цена / рынок / сторона — в заявках веток
+    lots = price = side = None
+    market = bool(re.search(r"по\s+рынку|на\s+рыно[кч]|рыночн", t))
+    m = re.search(r"(\d+)\s*(?:лот|плот|штук|акци)", t) or re.search(r"об[ъь]?[её]м\w*\D{0,20}?(\d+)", t)
+    if m:
+        lots = int(m.group(1))
+    m = re.search(r"цен\w*\D{0,20}?(\d+(?:[.,]\d+)?)", t) or (None if lots else re.search(r"\sпо\s+(\d+(?:[.,]\d+)?)", t))
+    if m:
+        price = float(m.group(1).replace(",", "."))
+    if re.search(r"на\s+продаж|продава|в\s+шорт", t):
+        side = "sell"
+    elif re.search(r"на\s+покупк|покупа|в\s+лонг", t):
+        side = "buy"
+    if lots is None and price is None and not market and side is None:
+        return {"ok": False, "text": f"Что поменять в наблюдателе «{name}», сэр: объём, цену, по рынку, "
+                                     "включить, выключить или удалить?"}
+    orders = [o for b in w.get("branches") or [] for o in b.get("orders") or []]
+    only = [o for o in orders if o.get("ticker") and re.search(r"(?<![a-zа-я])" + re.escape(o["ticker"].lower()) + r"(?![a-zа-я])", t)]
+    target = only or orders
+    if not target:
+        return {"ok": False, "text": f"В наблюдателе «{name}» нет заявок, сэр — менять нечего."}
+    n_cs = n_set = 0
+    for o in target:
+        if o.get("venue") == "cscalp":
+            if side:
+                o["side"] = side
+            n_cs += 1
+            continue                                   # объём и цену CScalp берёт из своего стакана
+        if lots is not None:
+            o["lots"] = lots
+        if market:
+            o["price"] = None
+        elif price is not None:
+            o["price"] = price
+        if side:
+            o["side"] = side
+        n_set += 1
+    r = upsert(w)
+    if not r.get("ok"):
+        return r
+    parts = []
+    if lots is not None:
+        parts.append(f"объём {lots} {_lots_ru(lots)}")
+    if market:
+        parts.append("по рынку")
+    elif price is not None:
+        parts.append(f"цена {price:g}")
+    if side:
+        parts.append("на продажу" if side == "sell" else "на покупку")
+    n = n_set if (lots is not None or price is not None or market) and not side else len(target)
+    if n == 0:
+        return {"ok": False, "text": f"В наблюдателе «{name}» только стаканы CScalp — объём и цену там задаёт сам стакан, сэр."}
+    txt = f"{label} «{name}»: {', '.join(parts)} — в {n} {'заявке' if n == 1 else 'заявках'}."
+    if n_cs and (lots is not None or price is not None or market):
+        txt += " В стаканах CScalp объём и цена — те, что стоят в самом стакане."
+    if LAYOUT and any(o.get("venue") != "cscalp" for o in target):
+        threading.Thread(target=_layout_and_announce, args=(get(w["id"]),), daemon=True).start()
+        txt += " Обновляю виджеты в терминале."
+    return {"ok": True, "id": w["id"], "text": txt}
+
+
+def _lots_ru(n):
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return "лот"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "лота"
+    return "лотов"
+
+
 def _layout_and_announce(w):
     try:
         res = LAYOUT(w) or {}
@@ -598,6 +779,38 @@ def choose_branch(branches, val):
 def _vtxt(val):
     return "нет" if val == 0 else "не названо" if val is None else ("%g" % val)
 
+_SPECULATIVE = re.compile(r"\bмож(ет|ут)\b|возможн|вероятн|слух|угроз|не исключ|планиру|готов\w* (?:атак|удар)")
+
+
+def _words_branch(branches, text):
+    """Первая ветка «по словам»: есть любое слово из words (любая форма) и нет ни одного из except."""
+    low = (text or "").lower().replace("ё", "е")
+    hit = lambda ws: any(_stem(x) in low for x in ws or [] if x)
+    for b in branches:
+        if b.get("type") == "words" and hit(b.get("words")) and not hit(b.get("except")):
+            return b
+    return None
+
+
+def _fire_words(w, news_text, meta=None):
+    """Ветки по словам (смысл новости без чисел и без мозга): «ЦОД не пострадал» -> купить, «удар по ЦОД» -> продать.
+    Анонсы и угрозы («возможна атака», «угроза удара») пропускаются — ждём факт."""
+    if _SPECULATIVE.search((news_text or "").lower()):
+        return "это угроза или предположение, а не факт — ничего не нажимаю, жду. (прогноз или анонс)"
+    branches = w.get("branches") or []
+    b = _words_branch(branches, f"{news_text} {(meta or {}).get('body') or ''}")
+    if not b:
+        return "по словам ветки нет — жду."
+    i = branches.index(b) + 1
+    if not b.get("orders"):
+        return f"ветка {i} — ничего не делаем."
+    if not EXECUTOR:
+        return f"ветка {i}, но исполнитель терминала не подключён."
+    res = EXECUTOR(w, b, news_text, meta=meta) or {}
+    nox_scenarios._log(f"НАБЛЮДАТЕЛЬ «{w.get('name')}» (по словам) -> ветка {i}: {res.get('text', '')}")
+    return f"ветка {i}. {res.get('text', '')}"
+
+
 def _fire_branches(w, news_text, meta=None):
     """Наблюдатель с ветками: число из новости -> ветка -> нажать её кнопки. Возвращает текст отчёта.
     СЛОВЕСНЫЙ режим (все ветки type=any): сработало само слово — нажимаем сразу, без мозга и без фильтра
@@ -605,6 +818,8 @@ def _fire_branches(w, news_text, meta=None):
     branches = w.get("branches") or []
     if w.get("kind") == "rate":
         return _fire_rate(w, news_text, meta)
+    if branches and any(b.get("type") == "words" for b in branches):
+        return _fire_words(w, news_text, meta)
     ev = w.get("event") or " ".join(w.get("keywords") or [])
     if branches and all(b.get("type") == "any" for b in branches):
         b = branches[0]
@@ -615,12 +830,23 @@ def _fire_branches(w, news_text, meta=None):
         res = EXECUTOR(w, b, news_text, meta=meta) or {}
         nox_scenarios._log(f"НАБЛЮДАТЕЛЬ «{w.get('name')}» (слово): {res.get('text', '')}")
         return res.get("text", "")
-    # прогнозы/слухи — не решение: число из них НЕ берём (мозг упорно его достаёт) -> ничего не нажимаем
-    if re.search(r"ожида|прогноз|\bможет\b|источник|аналитик|оценк|слух|вероятн|планиру|рассмотр|обсуд",
-                 (news_text or "").lower()):
-        nox_scenarios._log(f"НАБЛЮДАТЕЛЬ «{w.get('name')}»: прогноз/анонс, не решение — пропуск: {news_text[:80]}")
-        return f"{ev}: это прогноз или анонс, а не решение — ничего не нажимаю, жду официальную новость."
-    val = nox_scenarios._extract_value(news_text, ev, model=(w.get("brain") or None))
+    api_val = (meta or {}).get("value")
+    if isinstance(api_val, (int, float)):
+        val = float(api_val)        # число уже из официального API (BLS) — без мозга и без разбора текста
+    else:
+        # прогнозы/слухи — не решение: число из них НЕ берём (мозг упорно его достаёт) -> ничего не нажимаем
+        if re.search(r"ожида|прогноз|\bможет\b|источник|аналитик|оценк|слух|вероятн|планиру|рассмотр|обсуд",
+                     (news_text or "").lower()):
+            nox_scenarios._log(f"НАБЛЮДАТЕЛЬ «{w.get('name')}»: прогноз/анонс, не решение — пропуск: {news_text[:80]}")
+            return f"{ev}: это прогноз или анонс, а не решение — ничего не нажимаю, жду официальную новость."
+        evl = (ev or "").lower()
+        val = (_weekly_inflation(news_text) if re.search(r"инфляц|недел", evl) else
+               _dividend_amount(news_text) if "дивиденд" in evl else None)
+        if val is None and "дивиденд" in evl and re.search(r"\d[\d,.\s]*(?:млрд|млн|трлн)", news_text or "", re.I):
+            # «направит на дивиденды 3 млрд руб» — общая сумма, мозг вернул бы 3 как «на акцию»
+            return f"{ev}: названа общая сумма выплаты, а не на акцию — ничего не нажимаю, жду сумму на акцию."
+        if val is None:
+            val = nox_scenarios._extract_value(news_text, ev, model=(w.get("brain") or None))
     b = choose_branch(branches, val)
     if not b:
         nox_scenarios._log(f"НАБЛЮДАТЕЛЬ «{w.get('name')}»: значение={val}, ветки нет")
@@ -634,6 +860,35 @@ def _fire_branches(w, news_text, meta=None):
     res = EXECUTOR(w, b, news_text, meta=meta) or {}
     nox_scenarios._log(f"НАБЛЮДАТЕЛЬ «{w.get('name')}»: значение={val} -> ветка {i}: {res.get('text', '')}")
     return f"{ev}: {_vtxt(val)} — ветка {i}. {res.get('text', '')}"
+
+# Недельная инфляция Росстата правилами (мозг 4–9 с): «Инфляция в РФ с 6 по 12 октября составила 0,15%»,
+# «…годовая 7,9%, недельная составила 0,2%», «цены за неделю выросли на 0,18%». Дефляция — с минусом.
+_WEEKLY_RX = re.compile(r"(?:за\s+неделю|недельн\w*|недел\w*|с\s+\d{1,2}(?:\s+\w+)?\s+по\s+\d{1,2}\s+\w+)"
+                        r"[^%]{0,90}?(-?\d+(?:[.,]\d+)?)\s*%", re.I)
+
+def _weekly_inflation(text):
+    m = _WEEKLY_RX.search(text or "")
+    if not m:
+        return None
+    v = float(m.group(1).replace(",", "."))
+    if v > 0 and re.search(r"дефляц|снизил|снизились|подешевел", (text or "").lower()):
+        v = -v
+    return v
+
+
+# Дивиденд на акцию правилами (мозг 4–9 с): «СД Циана рекомендовал дивиденды за 9 месяцев 2026 года в размере
+# 35 руб на акцию», «…выплатить 35 рублей на акцию в качестве дивидендов». Отказ — 0. Не нашли — мозг.
+_DIV_NONE = re.compile(r"не\s+выпла|не\s+направ|не\s+распредел|без\s+дивиденд|отказ\w*\s+от\s+(?:выплат|дивиденд)", re.I)
+_DIV_RX = re.compile(r"дивиденд\w*[^.;!?]{0,80}?(\d+(?:[.,]\d+)?)\s*(?:руб|₽|р\.)", re.I)
+_DIV_RX2 = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:руб\w*|₽|р\.)\s*(?:на\s+(?:одну\s+)?акци\w*)?[^.;!?]{0,40}?дивиденд", re.I)
+
+def _dividend_amount(text):
+    t = text or ""
+    if _DIV_NONE.search(t):
+        return 0.0
+    m = _DIV_RX.search(t) or _DIV_RX2.search(t)
+    return float(m.group(1).replace(",", ".")) if m else None
+
 
 def _rate_branch(branches, bp):
     """Ветка по изменению ставки (б.п.). 0 — обычное значение «сохранение» (не «не выплачивает»)."""
@@ -833,6 +1088,18 @@ def dry_run(wid, value):
             return {"ok": False, "text": "Исполнитель терминала не подключён."}
         res = EXECUTOR(w, b, "", dry=True) or {}
         return {"ok": True, "branch": i, "text": f"{what}Изменение {bp:+d} б.п. → ветка {i}. {res.get('text', '')}"}
+    if any(b.get("type") == "words" for b in (w.get("branches") or [])):
+        txt = str(value or "").strip()
+        if _SPECULATIVE.search(txt.lower()):
+            return {"ok": True, "text": "Угроза или предположение, а не факт — наблюдатель пропустит и будет ждать."}
+        b = _words_branch(w.get("branches") or [], txt)
+        if not b:
+            return {"ok": True, "text": "Ни одна ветка по словам не подходит — наблюдатель подождёт следующую новость."}
+        i = w["branches"].index(b) + 1
+        if not b.get("orders"):
+            return {"ok": True, "branch": i, "text": f"Ветка {i}: ничего не делать."}
+        res = EXECUTOR(w, b, "", dry=True) if EXECUTOR else {"text": "исполнитель не подключён"}
+        return {"ok": True, "branch": i, "text": f"Ветка {i}. {(res or {}).get('text', '')}"}
     try:
         val = float(str(value).replace(",", "."))
     except Exception:
@@ -948,12 +1215,12 @@ def _on_news(items, source="trading"):
                 if not re.search(pre, blob):
                     continue
             else:
-                roots = [_stem(k) for k in w["keywords"]]
-                if not all(r in blob for r in roots):   # ВСЕ корни цели -> попадание (с учётом склонений)
+                # ВСЕ слова цели (с учётом склонений); «а|б» — любое из вариантов
+                if not all(any(_stem(a.strip()) in blob for a in k.split("|") if a.strip()) for k in w["keywords"]):
                     continue
             seen, det = it.get("seen"), it.get("_detect")
             if seen and det:
-                nox_scenarios._log(f"СОВПАЛ «{w.get('name')}»: новость появилась на странице -> ридер увидел "
+                nox_scenarios._log(f"СОВПАЛ «{w.get('name')}» ({it.get('feed') or source}): новость появилась на странице -> ридер увидел "
                                    f"за {(det - seen / 1000) * 1000:.0f} мс")
             acted = _fire(w, it.get("text", "") or it.get("body", ""), it)
             changed = True

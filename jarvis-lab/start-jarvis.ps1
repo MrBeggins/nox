@@ -46,8 +46,11 @@ if (-not $rup) {
 #     из него читаются новости Trading Tools и календарь MindStocks. Если не запущено.
 $yup = $false
 try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', 9222); $c.Close(); $yup = $true } catch {}
-if (-not $yup) {
-    Start-Process -FilePath "C:\Program Files\Yandex\YandexBrowser\Application\browser.exe" `
+$yandex = @("C:\Program Files\Yandex\YandexBrowser\Application\browser.exe",
+            "C:\Program Files (x86)\Yandex\YandexBrowser\Application\browser.exe",
+            "$env:LOCALAPPDATA\Yandex\YandexBrowser\Application\browser.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $yup -and $yandex) {
+    Start-Process -FilePath $yandex `
         -ArgumentList '--user-data-dir=C:\jarvis-voice\yandex_jarvis','--remote-debugging-port=9222','--no-first-run','--no-default-browser-check'
     # адрес терминала не передаём: браузер восстановит прошлые вкладки, а если терминала нет —
     # terminal_reader откроет ровно одну (раньше каждый запуск давал лишнюю вкладку)

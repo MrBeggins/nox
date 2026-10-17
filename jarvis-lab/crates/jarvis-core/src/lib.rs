@@ -54,6 +54,8 @@ pub mod vision;
 
 // T-terminal reader — voice queries about portfolio/quotes (read-only)
 pub mod terminal;
+pub mod numwords;   // числа словами из Vosk («пятьсот сорок пять») -> цифры для разбора заявок
+pub mod speechfix;  // словарь ошибок распознавания (nox_speech_fix.json) — сразу после Vosk
 pub mod shutdown;
 pub mod address;
 pub mod features;   // выключатели функций («Фичи» в настройках), общий файл с Python-службами

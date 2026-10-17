@@ -11,7 +11,7 @@
 
 Запуск: python terminal_reader.py  ->  http://127.0.0.1:8126
 """
-import threading, queue, time, json, re, os, socket, base64, struct, functools
+import threading, queue, time, json, re, os, socket, base64, struct, functools, collections
 import urllib.parse as _uparse
 from fastapi import FastAPI
 import uvicorn
@@ -51,10 +51,18 @@ try:
 except Exception:
     nox_widgets = None
 
-def _is_dup(text):
-    """Похожая новость уже озвучивалась в последние 15 мин? (анти-повтор из разных источников)"""
+def _is_dup(text, smart=True):
+    """Похожая новость уже озвучивалась сегодня (не меньше 2 ч)? Словами, а если не похоже — смысловой судья
+    (Qwen 7B, тумблер «Фичи» → «Смысловой фильтр повторов»). smart=False — только словами (корпсобытия: у них
+    своя память _corp_repeat, и там важна каждая доля секунды)."""
     try:
-        return bool(nox_dedup and nox_dedup.is_dup(text))
+        if not nox_dedup:
+            return False
+        dup = bool(nox_dedup.is_dup(text, smart=smart and _feat("smart_dedup")))
+        j = nox_dedup.last_judge
+        if dup and j.get("verdict") and nox_scenarios:
+            nox_scenarios._log(f"ПОВТОР [смысл, Qwen {j.get('ms')} мс]: не читаю — {text[:110]} ≈ {j.get('prev', '')[:110]}")
+        return dup
     except Exception:
         return False
 
@@ -92,20 +100,26 @@ MON_JS = r"""
   // момент ПОЯВЛЕНИЯ каждой новости на странице: следим за контейнером ленты (Date.now(), мс)
   const keyOf = (inner) => (inner.innerText || '').replace(/\s+/g,' ').trim().slice(0,120);
   const stamp = () => {
-    const seen = window.__noxSeen;
+    const seen = window.__noxSeen; let fresh = false;
     for (const inner of document.querySelectorAll('.news_row .news_title_inner')) {
-      const k = keyOf(inner); if (k && !seen.has(k)) seen.set(k, Date.now());
+      const k = keyOf(inner); if (k && !seen.has(k)) { seen.set(k, Date.now()); fresh = true; }
     }
+    // новая строка — сразу будим монитор ридера (Runtime.addBinding), не ждём следующего опроса
+    if (fresh) { try { window.noxNewsPing && window.noxNewsPing('tt'); } catch (e) {} }
     if (seen.size > 3000) { const ks = [...seen.keys()].slice(0, 1500); ks.forEach(k => seen.delete(k)); }
   };
   if (!window.__noxSeen) window.__noxSeen = new Map();
   const first = document.querySelector('.news_row');
   const box = first && first.parentElement;
-  if (box && window.__noxObsTarget !== box) {            // лента перерисована/вкладка сменилась — переподписаться
+  // версия наблюдателей: новый код ридера пересоздаёт их (иначе в странице жил старый stamp без сигнала —
+  // лента TT не перерисовывалась и noxNewsPing не звался, 16.10)
+  const OBS_VER = 2;
+  if (box && (window.__noxObsTarget !== box || window.__noxObsVer !== OBS_VER)) {   // лента перерисована/вкладка сменилась
     if (window.__noxObs) window.__noxObs.disconnect();
     window.__noxObs = new MutationObserver(stamp);
     window.__noxObs.observe(box, {childList: true, subtree: true});
     window.__noxObsTarget = box;
+    window.__noxObsVer = OBS_VER;
   }
   stamp();
   const rows = [...document.querySelectorAll('.news_row')];
@@ -124,12 +138,64 @@ MON_JS = r"""
     // подсвеченные слова и хэштеги (доп. сигналы)
     const hl = [...inner.querySelectorAll('b[style*="color"],span[style*="color"],font[color]')].map(e=>e.textContent.trim()).filter(Boolean);
     const hashtags = (text.match(/#[\wА-Яа-яЁё]+/g) || []);
-    // текст тела (для распознавания события/цены)
-    const body = ((r.querySelector('.news_preview_inner')||r.querySelector('.news_content')||{}).innerText||'').replace(/\s+/g,' ').trim().slice(0,700);
-    out.push({ text: text.slice(0,400), tickers, source, hl, hashtags, body,
+    // текст тела (для распознавания события/цены): раскрытия (ЦРКИ / e-disclosure) — до 4000 символов
+    // (в решениях СД о дивидендах отсечка дальше 700-го символа), остальные — 700
+    const longBody = /црки|disclosure/i.test(source);
+    const body = ((r.querySelector('.news_preview_inner')||r.querySelector('.news_content')||{}).innerText||'').replace(/\s+/g,' ').trim().slice(0, longBody ? 4000 : 700);
+    out.push({ text: text.slice(0,400), tickers, source, hl, hashtags, body, feed: 'TT',
                seen: window.__noxSeen.get(keyOf(inner)) || Date.now() });
   }
-  return out;   // newest first
+  // --- вторая лента: Stocksi Ultimate (.stocksiWidget). Новые сверху, у каждой id в классе stocksiNews-N;
+  // дубли других источников Stocksi сам прячет под корень (.stocksiDupList) — их не берём
+  const sbox = document.querySelector('.stocksiWidget .newsListContainer');
+  if (!window.__noxSeenS) window.__noxSeenS = new Map();
+  const sid = (p) => ((String(p.className).match(/stocksiNews-(\d+)/) || [])[1] || '');
+  const sstamp = () => {
+    const seen = window.__noxSeenS; let fresh = false;
+    for (const p of document.querySelectorAll('.stocksiWidget .newsListContainer .stocksiNewsPreview')) {
+      const k = sid(p); if (k && !seen.has(k)) { seen.set(k, Date.now()); fresh = true; }
+    }
+    if (fresh) { try { window.noxNewsPing && window.noxNewsPing('st'); } catch (e) {} }
+    if (seen.size > 5000) { const ks = [...seen.keys()].slice(0, 2500); ks.forEach(k => seen.delete(k)); }
+  };
+  if (sbox && (window.__noxObsTargetS !== sbox || window.__noxObsVerS !== OBS_VER)) {
+    if (window.__noxObsS) window.__noxObsS.disconnect();
+    window.__noxObsS = new MutationObserver(sstamp);
+    window.__noxObsS.observe(sbox, {childList: true, subtree: true});
+    window.__noxObsTargetS = sbox;
+    window.__noxObsVerS = OBS_VER;
+  }
+  if (sbox) {
+    sstamp();
+    // эмодзи в заголовках («💼Решения совета директоров») — вон: голосу и ключу повтора они не нужны
+    const clean = (x) => (x || '').replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, '').replace(/\s+/g, ' ').trim();
+    // Stocksi рисует лениво (content-visibility: auto): у невидимых строк innerText пустой — тогда textContent
+    const tx = (el) => el ? (el.innerText || el.textContent || '') : '';
+    let n = 0;
+    for (const p of sbox.querySelectorAll('.stocksiNewsPreview')) {
+      if (p.closest('.stocksiDupList')) continue;
+      const k = sid(p);
+      const title = clean(tx(p.querySelector('.stocksiNewsTitle')));
+      const short = clean([tx(p.querySelector('.stocksiNewsShort')), tx(p.querySelector('.stocksiNewsFullText'))]
+                          .filter(Boolean).join(' '));
+      // заголовок-обрубок «Председатель Европейского совета Антониу Коста:» — суть в тексте под ним: склеить
+      const cut = title && /:$/.test(title) && short;
+      const text = cut ? (title + ' ' + short).slice(0, 400) : (title || short.slice(0, 400));
+      if (!text) continue;
+      const source = clean(tx(p.querySelector('.NewsSource')));
+      const tickers = [...p.querySelectorAll('.header .ticker[data-link-widget]')]
+        .map(t => (t.getAttribute('data-link-widget') || '').toUpperCase()).filter(Boolean);
+      const hashtags = [...p.querySelectorAll('.header .hashtag')].map(h => h.textContent.trim()).filter(Boolean);
+      const hl = [...p.querySelectorAll('.stocksiNewsTitle b')].map(e => e.textContent.trim()).filter(Boolean);
+      const longBody = /црки|disclosure/i.test(source);
+      out.push({ text: text.slice(0, 400), tickers, source, hl, hashtags,
+                 body: (title ? short : '').slice(0, longBody ? 4000 : 700), feed: 'Stocksi', sid: k,
+                 time: clean(tx(p.querySelector('.time-section'))),
+                 seen: window.__noxSeenS.get(k) || Date.now() });
+      if (++n >= 40) break;
+    }
+  }
+  return out;   // в каждой ленте newest first (порядок между лентами — по seen, в ридере)
 }
 """
 
@@ -246,6 +312,32 @@ def _find_terminal_page(browser):
         return None
 
 
+_AUTO_TABS = ("nsddata.ru",)     # служебные вкладки Нокса (опрос НРД) — их можно закрыть, служба откроет заново
+
+
+def _unstick_tabs():
+    """Зависшая страница (17.10: nsddata.ru перестала отвечать) не даёт Playwright подключиться к браузеру:
+    connect_over_cdp ждёт её и падает по таймауту 15 с — ридер без терминала, новости не читаются.
+    Проверяем служебные вкладки за 3 с и закрываем зависшую (вкладки пользователя не трогаем)."""
+    try:
+        import urllib.request as _ur
+        from websockets.sync.client import connect as _wsc
+        lst = json.loads(_ur.urlopen(CDP_URL + "/json/list", timeout=5).read().decode("utf-8", "replace"))
+        for t in lst:
+            if t.get("type") != "page" or not any(a in (t.get("url") or "") for a in _AUTO_TABS):
+                continue
+            try:
+                with _wsc(t["webSocketDebuggerUrl"], open_timeout=3, max_size=None) as ws:
+                    ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate", "params": {"expression": "1"}}))
+                    ws.recv(timeout=3)
+            except Exception:
+                _ur.urlopen(f"{CDP_URL}/json/close/{t['id']}", timeout=5)
+                if nox_scenarios:
+                    nox_scenarios._log(f"ТЕРМИНАЛ: закрыл зависшую служебную вкладку {t.get('url', '')[:60]} — мешала подключению")
+    except Exception:
+        pass
+
+
 def _worker():
     from playwright.sync_api import sync_playwright
     attempt = 0
@@ -299,6 +391,8 @@ def _worker():
             _state["err"] = f"CDP не подключён: {e}"
             _state["url"] = ""
             _ready.set()
+            if "connect_over_cdp" in str(e) and "Timeout" in str(e):
+                _unstick_tabs()
             time.sleep(6)
 
 def _is_conn_lost(e):
@@ -312,22 +406,41 @@ def start_worker():
         threading.Thread(target=_worker, daemon=True).start()
         threading.Thread(target=_monitor_loop, daemon=True).start()
         threading.Thread(target=_event_worker, daemon=True).start()     # корпсобытия — мозг в фоне
+        threading.Thread(target=_read_worker, daemon=True).start()      # чтение ленты + умный отбор (проверка)
         threading.Thread(target=_focus_loop, daemon=True).start()       # режим тишины перед новостью по времени
         threading.Thread(target=_official_loop, daemon=True).start()    # решения ЦБ/ФРС прямо с cbr.ru / federalreserve.gov
         threading.Thread(target=_terminal_health_loop, daemon=True).start()
         threading.Thread(target=_overlay_loop, daemon=True).start()   # подписи веток наблюдателей
         threading.Thread(target=_cscalp_arm_loop, daemon=True).start()  # сверка стаканов CScalp у наблюдателей
+        threading.Thread(target=_nsd_loop, daemon=True).start()       # НРД: неисполнение обязательств по облигациям
+        threading.Thread(target=_ping_loop, daemon=True).start()      # мгновенный сигнал «новая строка в ленте»
+        try:
+            import nox_tinvest
+            nox_tinvest.start_warm()      # соединение для заявок через API всегда тёплое (GetInfo раз в 20 с)
+        except Exception:
+            pass
+        threading.Thread(target=_copy_loop, daemon=True).start()      # копирование сделок трейдера (ProfitKing)
+        threading.Thread(target=_dialog_loop, daemon=True).start()    # история разговора (15 мин) из IPC Нокса
+        if nox_dedup and _feat("smart_dedup"):                       # смысловой судья повторов — в видеопамять заранее
+            threading.Thread(target=nox_dedup.warm_judge, daemon=True).start()
         if nox_scenarios:
             nox_scenarios.start_capture()    # слушаем F2 для захвата координат стаканов
             nox_scenarios.start_scheduler()  # планировщик ожидаемых событий (прогрев Ollama, окно гонки, анонс)
 
-_PAGE_STATE_JS = ("()=>({n:document.querySelectorAll('.news_row').length,"
-                  "blen:(document.body.innerText||'').length,"
-                  "gate:/ертификат|инцифр|используйте .{0,4}ндекс/i.test(document.body.innerText||'')})")
+# Шлюз (страница Яндекса «установите сертификат Минцифры») ищем ТОЛЬКО когда интерфейса терминала нет:
+# раньше слова проверялись по всему тексту страницы, и новость в ленте «Минцифры просит операторов…»
+# (14.10, Интерфакс 13:11) считалась шлюзом — Нокс перезагружал терминал каждые 90 с, виджеты слетали.
+_PAGE_STATE_JS = ("()=>{const t=document.body.innerText||'';"
+                  "const ui=document.querySelectorAll('.pro-editable-tab-title').length>0"
+                  "||!!document.querySelector('[class*=\"widgetsWrap\"]');"
+                  "return {n:document.querySelectorAll('.news_row').length,blen:t.length,ui:ui,"
+                  "gate:!ui&&/ертификат|инцифр|используйте .{0,4}ндекс/i.test(t)};}")
 
 def _page_gated(st):
     if not st:
         return True
+    if st.get("ui"):                     # терминал загружен (вкладки/виджеты есть) — не трогаем
+        return False
     return bool(st.get("gate")) or (st.get("blen", 0) < 800 and st.get("n", 0) == 0)
 
 def _terminal_health_loop():
@@ -340,6 +453,12 @@ def _terminal_health_loop():
                 st, err = _submit(lambda pg: pg.evaluate(_PAGE_STATE_JS), timeout=20)
                 if not err and _page_gated(st):
                     # 1) возможно просто не отрендерилось — перезагружаем
+                    try:
+                        import nox_scenarios as _ns
+                        _ns._log(f"ТЕРМИНАЛ: перезагружаю страницу — {'шлюз' if (st or {}).get('gate') else 'пустая'} "
+                                 f"(текст {(st or {}).get('blen')}, новостей {(st or {}).get('n')})")
+                    except Exception:
+                        pass
                     _submit(lambda pg: pg.reload(timeout=25000), timeout=30)
                     time.sleep(9)
                     st2, _e = _submit(lambda pg: pg.evaluate(_PAGE_STATE_JS), timeout=20)
@@ -404,8 +523,132 @@ def _set_mon(on):
     except Exception:
         pass
 
+# ------------------------------------------------------------------ разговор за 15 минут + живые данные для мозга
+# Ридер слушает IPC Нокса (9712): speech_recognized — что сказал пользователь, assistant_reply — что ответил Нокс
+# (туда же идут озвученные новости). История последних DIALOG_MIN минут уходит мозгу вместе с запросом —
+# «а по Сберу?», «а почему он падает?» понятны. Новости обеих лент копятся в _news_recent — для ответов про инструмент.
+DIALOG_MIN = 15
+_dialog = collections.deque(maxlen=300)          # (ts, role, text): user | nox | news
+_news_recent = collections.deque(maxlen=600)     # (ts, текст, тикеры)
+_announced = collections.deque(maxlen=200)       # ключи текстов, которые ридер сам отправил на озвучку
+
+
+def _dkey(t):
+    return re.sub(r"[^а-яёa-z0-9]+", "", re.sub(r"(?<![а-я])сэр(?![а-я])", "", (t or "").lower()))[:40]
+
+
+def _dialog_add(role, text):
+    text = (text or "").strip()
+    if not text or (role == "user" and len(text) < 3):
+        return
+    if role == "nox" and re.match(r"(Восстановил|Все системы|Добр(ое|ый|ой)\s|Готов к работе|Слушаю)", text):
+        return                                   # служебные фразы сторожа и приветствия — не разговор
+    if role == "nox":
+        k = _dkey(text)
+        last_user = next((ts for ts, r, _x in reversed(_dialog) if r == "user"), 0)
+        answered = any(r == "nox" and ts >= last_user for ts, r, _x in _dialog)
+        # ответ на вопрос — если пользователь говорил не дальше 40 с назад и ему ещё не ответили; иначе оповещение
+        if k in _announced or time.time() - last_user > 40 or answered:
+            role = "news"
+    _dialog.append((time.time(), role, text[:400]))
+
+
+def _dialog_loop():
+    """Клиент IPC Нокса: пишет реплики в _dialog. Переподключается сам (jarvis-app перезапускается)."""
+    from websockets.sync.client import connect as _wsc
+    while True:
+        try:
+            with _wsc(f"ws://{IPC_HOST}:{IPC_PORT}", open_timeout=5, max_size=None) as ws:
+                while True:
+                    m = json.loads(ws.recv())
+                    ev = m.get("event")
+                    if ev == "speech_recognized":
+                        _dialog_add("user", m.get("text", ""))
+                        _speech_log(m.get("text", ""))
+                    elif ev == "assistant_reply":
+                        _dialog_add("nox", m.get("text", ""))
+        except Exception:
+            time.sleep(5)
+
+
+SPEECH_LOG = r"C:\jarvis-voice\speech_log.jsonl"     # что распознал Vosk — для словаря ошибок (nox_speech_fix.json)
+
+
+def _speech_log(text):
+    try:
+        if os.path.exists(SPEECH_LOG) and os.path.getsize(SPEECH_LOG) > 5_000_000:
+            os.replace(SPEECH_LOG, SPEECH_LOG + ".old")
+        with open(SPEECH_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "text": text}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _dialog_text(current=""):
+    """История за DIALOG_MIN минут для мозга (без текущей фразы), новости — не больше трёх последних."""
+    cut = time.time() - DIALOG_MIN * 60
+    rows = [(ts, r, x) for ts, r, x in _dialog if ts >= cut]
+    cur = _dkey(current)
+    if rows and rows[-1][1] == "user" and _dkey(rows[-1][2]) == cur:
+        rows = rows[:-1]
+    news_keep = {id(x) for x in [x for x in rows if x[1] == "news"][-3:]}
+    out = []
+    for row in rows:
+        ts, r, x = row
+        if r == "news" and id(row) not in news_keep:
+            continue
+        hm = time.strftime("%H:%M", time.localtime(ts))
+        out.append({"user": f"[{hm}] Пользователь: {x}", "nox": f"[{hm}] Нокс: {x}",
+                    "news": f"[{hm}] Нокс прочитал новость: {x[:200]}"}[r])
+    s = "\n".join(out)
+    return s[-2500:]
+
+
+def _last_user_turn(current=""):
+    cur = _dkey(current)
+    for ts, r, x in reversed(_dialog):
+        if r == "user" and _dkey(x) != cur and ts >= time.time() - DIALOG_MIN * 60:
+            return x
+    return ""
+
+
+def _live_context(t):
+    """Цена, изменение, позиция по инструментам из запроса (или из прошлой фразы — «а почему он падает?»)
+    и новости по ним за 3 часа."""
+    import urllib.request as _ur, urllib.parse as _up
+
+    def ctx(q):
+        try:
+            return json.loads(_ur.urlopen("http://127.0.0.1:8124/context?" + _up.urlencode({"text": q}), timeout=5).read().decode("utf-8"))
+        except Exception:
+            return {"items": [], "text": ""}
+    c = ctx(t)
+    if not c.get("text"):
+        prev = _last_user_turn(t)
+        if prev:
+            c = ctx(prev)
+    if not c.get("text"):
+        return ""
+    lines = [c["text"]]
+    cut = time.time() - 3 * 3600
+    for it in c.get("items", []):
+        tk = (it.get("ticker") or "").upper()
+        stem = re.sub(r"[^а-яёa-z]", "", (it.get("name") or "").lower().split(" ")[0])[:5]
+        hits = [(ts, x) for ts, x, tks in _news_recent if ts >= cut and
+                (tk and tk in [str(z).upper() for z in tks] or (len(stem) >= 4 and stem in x.lower()))]
+        for ts, x in hits[-3:]:
+            lines.append(f"Новость {time.strftime('%H:%M', time.localtime(ts))} про {it.get('name')}: {x[:220]}")
+    return "\n".join(lines)
+
+
 def _ipc_announce(text):
     """Отправить проактивную озвучку в jarvis-app по WebSocket (9712)."""
+    _announced.append(_dkey(text))
+    if nox_scenarios:
+        try:
+            nox_scenarios._log(f"ГОЛОС: {str(text)[:220]}")
+        except Exception:
+            pass
     try:
         s = socket.create_connection((IPC_HOST, IPC_PORT), timeout=5)
         key = base64.b64encode(os.urandom(16)).decode()
@@ -447,9 +690,39 @@ TICKER_NAME = {
     "BSPB": "Банк Санкт-Петербург", "T": "Т Технологии", "TCSG": "Т Технологии", "POSI": "Позитив",
     "SIBN": "Газпромнефть", "TRNFP": "Транснефть преф", "VSEH": "Все Инструменты", "MRKK": "Россети Кубань",
     "RTKM": "Ростелеком", "MTLR": "Мечел", "SELG": "Селигдар", "UPRO": "Юнипро", "BANE": "Башнефть",
+    "CNRU": "Циан", "KAZT": "Куйбышевазот", "KAZTP": "Куйбышевазот преф", "SAGO": "Самараэнерго",
+    "SAGOP": "Самараэнерго преф", "HEAD": "Хэдхантер", "FLOT": "Совкомфлот", "SGZH": "Сегежа", "AKRN": "Акрон",
 }
 
+NAMES_FILE = r"C:\jarvis-voice\ticker_names.txt"
+_names_mt = [0.0]
+
+def _names_load():
+    """ticker_names.txt («ТИКЕР = название», # — комментарий) -> TICKER_NAME. Читаем заново, только если файл менялся."""
+    try:
+        mt = os.path.getmtime(NAMES_FILE)
+    except OSError:
+        return
+    if mt == _names_mt[0]:
+        return
+    _names_mt[0] = mt
+    try:
+        for ln in open(NAMES_FILE, encoding="utf-8-sig"):
+            ln = ln.split("#", 1)[0].strip()
+            if "=" not in ln:
+                continue
+            tk, nm = (x.strip() for x in ln.split("=", 1))
+            if tk and nm:
+                TICKER_NAME[tk.upper()] = nm
+            elif tk:
+                TICKER_NAME.pop(tk.upper(), None)
+    except Exception:
+        pass
+
+_names_load()
+
 def _tk_name(tk):
+    _names_load()
     return TICKER_NAME.get(tk.upper(), tk)
 
 def _detect_event(text):
@@ -478,6 +751,13 @@ _MONTHS_GEN = ["января", "февраля", "марта", "апреля", "
 def _disclosure(item):
     """Раскрытие о заседании совета/собрания с ВАЖНОЙ повесткой -> фраза для озвучки, иначе None."""
     title, body = item.get("text", "") or "", item.get("body", "") or ""
+    try:   # решение о дивидендах: «Циан: совет директоров рекомендовал дивиденды 33 руб на акцию …, отсечка 30 ноября»
+        import nox_divdisc
+        d = nox_divdisc.parse(title, body, item.get("tickers"), TICKER_NAME)
+        if d:
+            return nox_divdisc.speak(d)
+    except Exception:
+        pass
     full = re.sub(r"\s+", " ", title + " " + body)
     low = full.lower().replace("ё", "е")
     agenda = "повестк" in low
@@ -526,16 +806,27 @@ def _disclosure(item):
         return f"{who}: {org}{when} рассмотрит {what}{period}".strip(" :")
     return f"{who}: решение, {org}{when}: {what}{amount}{period}".strip(" :")
 
+_EV_PRICE_RX = re.compile(r"(?:дивиденд|оферт|выкуп|допэмисс|buyback|байбек)[^.;!?]{0,60}?(\d+(?:[.,]\d+)?)\s*(?:руб|₽|р\.)",
+                          re.I)
+
 def _concise(item):
-    """Корпсобытие -> кратко 'ИМЯ [ЦЕНА руб] событие'. Иначе None (полный заголовок)."""
+    """Корпсобытие В ЗАГОЛОВКЕ с суммой при нём, без оговорок -> кратко «Имя: дивиденды 35 руб».
+    Иначе None — читаем заголовок целиком. Раньше событие искалось и в теле новости, а цена бралась первая
+    попавшаяся: «Альфа повысила цель по Совкомфлоту до 120 руб» (в теле: «дивиденды 9 руб») звучало
+    «Совкомфлот 120 руб дивиденды»; «рекомендовал НЕ выплачивать дивиденды» — «Куйбышевазот дивиденды»."""
     tks = item.get("tickers") or []
-    full = (item.get("text", "") + " " + item.get("body", ""))
-    ev = _detect_event(full)
-    if tks and ev:
-        m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:руб|₽|р\.)", full, re.I)
-        price = (m.group(1).replace(",", ".") + " руб ") if m else ""
-        return f"{_tk_name(tks[0])} {price}{ev}".replace("  ", " ").strip()
-    return None
+    head = item.get("text", "") or ""
+    ev = _detect_event(head)
+    if not (tks and ev):
+        return None
+    try:
+        import nox_scenarios as _ns
+        if _ns.HEDGE_RX.search(head.lower().replace("ё", "е")):
+            return None
+    except Exception:
+        return None
+    m = _EV_PRICE_RX.search(head)
+    return f"{_tk_name(tks[0])}: {ev} {m.group(1)} руб" if m else None
 
 # Хвостовые атрибуции («…, сообщает Рейтер», «… как заявил Х») — режем ТОЛЬКО после
 # запятой/тире или «как» (иначе срежем главный глагол типа «Россия ЗАЯВЛЯЕТ …»).
@@ -555,9 +846,11 @@ _MAX_SAY = 320   # символов: длиннее — только по гра
 def _clean_sentence(s, tickers):
     s = _SRC_TAIL_LAT_RE.sub("", _SRC_TAIL_RE.sub("", s.strip()))
     s = _ATTR_RE.sub("", s).strip(" .,;—-–")          # «…, сообщает X»
-    for tk in tickers:                                 # тикеры -> произносимые имена
-        s = re.sub(r"(?<![A-Za-zА-Яа-яЁё])" + re.escape(tk) + r"(?![A-Za-zА-Яа-яЁё])",
+    for tk in tickers:                                 # тикеры -> произносимые имена («$KFBA» -> «Инград»)
+        s = re.sub(r"(?<![A-Za-zА-Яа-яЁё])\$?" + re.escape(tk) + r"(?![A-Za-zА-Яа-яЁё])",
                    _tk_name(tk), s, flags=re.I)
+    # «$KFBA», которого нет в шапке новости, — тоже по списку названий
+    s = re.sub(r"\$([A-Z][A-Z0-9]{1,6})\b", lambda m: TICKER_NAME.get(m.group(1), m.group(1)), s)
     return s
 
 def _shorten(item):
@@ -608,6 +901,201 @@ _SMART_SHOTS = [
     ("Президент поздравил нефтяников с профессиональным праздником", "ПРОПУСК"),
 ]
 
+_read_q = queue.Queue()
+
+# Умный отбор = ПРОВЕРКА поверх белого списка (15.10, просьба пользователя): мозг ничего не добавляет «по своему
+# желанию», только отсеивает новости, которые не двигают котировки. Читается исходный заголовок, не пересказ.
+# Критерии слов белого списка (зачем слово добавлено) — news_filter.json "why": {"санкции": "…"} — идут в вопрос.
+_CHECK_SYS = (
+    "Ты — фильтр биржевой ленты для трейдера (акции и фьючерсы Мосбиржи, облигации, валюта, нефть, золото, индексы). "
+    "Новость УЖЕ совпала с белым списком пользователя; ты ничего не добавляешь, только отсеиваешь лишнее.\n"
+    "ДА — если новость может сдвинуть котировки: решения властей и регуляторов, санкции, переговоры и военные события "
+    "с влиянием на рынок и экономику, корпоративные события (дивиденды, отчётность, сделки, допэмиссия, выкуп, дефолт), "
+    "макроданные, ставки, сырьё, налоги и пошлины.\n"
+    "НЕТ — если это спорт, культура, погода, происшествия без последствий для экономики, бытовые и социальные темы, "
+    "реклама, обзоры и мнения без новых фактов, служебные объявления биржи (графики торгов, риск-параметры, лимиты), "
+    "или слово из белого списка встретилось в другом смысле.\n"
+    "Если для совпавших слов даны критерии пользователя — решай строго по ним.\n"
+    "Политика, дипломатия и переговоры государств (визиты, встречи, перемирие, заявления лидеров и переговорщиков), "
+    "мобилизация и военные действия — это ДА. Если сомневаешься — ДА: пропустить важную новость хуже, "
+    "чем прочитать лишнюю.\n"
+    "Ответь одной строкой: «ДА» или «НЕТ: причина (до 6 слов)»."
+)
+_CHECK_SHOTS = [
+    ("Совпало: санкции.\nНовость: США ввели санкции против крупнейших нефтяных компаний России", "ДА"),
+    ("Совпало: переговоры.\nНовость: «Спартак» ведёт переговоры с новым главным тренером", "НЕТ: спорт"),
+    ("Совпало: помощь.\nНовость: Волонтёры оказали помощь бездомным животным в Москве", "НЕТ: не про рынок"),
+    ("Совпало: поддержка.\nНовость: Минфин подготовил меры поддержки угольной отрасли", "ДА"),
+    ("Совпало: территории.\nНовость: На территории Московского региона ожидается сильный снегопад", "НЕТ: погода"),
+    ("Совпало: источник мосбирж.\nНовость: Мосбиржа опубликовала график торгов в праздничные дни",
+     "НЕТ: служебное объявление биржи"),
+    ("Совпало: уиткофф.\nНовость: Уиткофф прибыл в Москву для переговоров с Путиным", "ДА"),
+    ("Совпало: прибыль.\nНовость: Чистая прибыль Сбербанка по МСФО за 9 месяцев выросла на 12%", "ДА"),
+    ("Совпало: дмитриев, переговоры.\nНовость: Дмитриев встретится с представителями США на следующей неделе", "ДА"),
+    ("Совпало: прибыль.\nНовость: Блогер рассказал, как получить прибыль от продажи старых вещей", "НЕТ: бытовая тема"),
+]
+
+
+def _match_why(item, cfg):
+    """Что из белого списка совпало: [«тикер SBER», «санкции», «источник мосбирж»]."""
+    out = []
+    tks = [t.upper() for t in (item.get("tickers") or [])]
+    out += [f"тикер {t}" for t in (cfg.get("tickers") or []) if t in tks]
+    low = _IDIOM.sub(" ", (item.get("text", "") + " " + item.get("body", "")).lower().replace("ё", "е"))
+    out += [p for p in (cfg.get("phrases") or []) if _phrase_hit(p.replace("ё", "е"), low)]
+    src = (item.get("source", "") or "").lower()
+    out += [f"источник {x}" for x in (cfg.get("sources") or []) if x in src]
+    return out
+
+
+def _smart_check(item, cfg):
+    """(читать?, причина). Совпало несколько слов — спрашиваем мозг ПО КАЖДОМУ со своим критерием и читаем, если
+    подошло хоть одно (16.10: «…с помощью 22-го пакета санкций» и «Уиткофф … для переговоров» модель 3b отсеивала
+    по критерию ДРУГОГО слова — «помощь», «переговоры»)."""
+    hits = _match_why(item, cfg)
+    no = []
+    for h in (hits or [""])[:4]:
+        ok, why = _smart_ask(item, cfg, [h] if h else [])
+        if ok:
+            return True, why
+        no.append(why)
+    return False, no[0]
+
+
+def _smart_ask(item, cfg, hits):
+    """Один вопрос мозгу. Мозг — модель Ollama со страницы «Мозг»; сбой или таймаут — читать (не терять новость)."""
+    import urllib.request
+    why = cfg.get("why") or {}
+    crit = "; ".join(f"«{h}» — {why[h]}" for h in hits if why.get(h))
+    try:
+        import nox_feedback                     # «такие не читай» / «такие читай всегда» — примеры пользователя
+        crit += nox_feedback.prompt_examples(cfg, hits)
+    except Exception:
+        pass
+    user = (f"Совпало: {', '.join(hits) or 'белый список'}." + (f"\nКритерии пользователя: {crit}" if crit else "")
+            + f"\nНовость: {(item.get('text') or '').strip()[:400]}")
+    msgs = [{"role": "system", "content": _CHECK_SYS}]
+    for u, a in _CHECK_SHOTS:
+        msgs += [{"role": "user", "content": u}, {"role": "assistant", "content": a}]
+    msgs.append({"role": "user", "content": user})
+    body = json.dumps({"model": (nox_scenarios._ollama_model() if nox_scenarios else "qwen2.5:7b"), "messages": msgs,
+                       "stream": False, "temperature": 0, "max_tokens": 20, "keep_alive": "30m"}).encode("utf-8")
+    try:
+        req = urllib.request.Request(_OLLAMA_CHAT, data=body, headers={"Content-Type": "application/json"})
+        resp = json.loads(urllib.request.urlopen(req, timeout=10).read().decode("utf-8"))["choices"][0]["message"]["content"]
+    except Exception as e:
+        return True, f"мозг не ответил ({type(e).__name__}) — читаю"
+    resp = (resp or "").strip().strip("«»\"' ")
+    if re.match(r"(?i)нет\b", resp):
+        return False, (resp.split(":", 1)[1].strip() if ":" in resp else "не про рынок")
+    return True, ", ".join(hits)
+
+
+# --- одно корпсобытие из многих источников (16.10, дивиденды ВИ.ру ~15 раз: ЦРКИ в двух лентах, Смартлаб,
+# TradingSharks, канал компании, «ПАО «ВИ.ру» дивиденды»… — каждый своими словами, похожесть текста не склеивала)
+_corp_said = {}            # (эмитент, тип) -> {"t": время, "amounts": {суммы на акцию}}
+_CORP_TTL = 6 * 3600
+_AMT_RX = re.compile(r"(\d[\d\s\u00a0]*(?:[.,]\d+)?)\s*(млрд|миллиард\w*|млн|миллион\w*|тыс\w*)?", re.I)
+
+def _amount_rub(s):
+    """«7 руб» -> 7, «42 коп» -> 0.42, «3 500 000 000 рублей» / «3,5 млрд» -> 3.5e9, «7/акция» -> 7."""
+    m = _AMT_RX.search(s or "")
+    if not m:
+        return None
+    try:
+        v = float(re.sub(r"[\s\u00a0]", "", m.group(1)).replace(",", "."))
+    except Exception:
+        return None
+    mul = (m.group(2) or "").lower()
+    v *= 1e9 if mul.startswith(("млрд", "миллиард")) else 1e6 if mul.startswith(("млн", "миллион")) else \
+        1e3 if mul.startswith("тыс") else 1
+    if re.match(r"\s*коп", (s or "")[m.end():]):
+        v /= 100
+    return v
+
+def _corp_issuer(it, name=""):
+    tk = ((it.get("tickers") or [""])[0] or "").upper()
+    if tk:
+        return tk
+    return re.sub(r"[^0-9a-zа-я]+", "", re.sub(r"\b(?:пао|мкпао|ао|оао)\b", "", (name or "").lower().replace("ё", "е")))
+
+def _corp_norm(n):
+    return re.sub(r"[^0-9a-zа-я]+", "", re.sub(r"\b(?:пао|мкпао|ао|оао)\b", "", (n or "").lower().replace("ё", "е")))
+
+def _corp_keys(it, name=""):
+    """Все имена эмитента: тикер, его название из списка, имя из новости («HNFG», «henderson», «хендерсон»…) —
+    16.10 событие легло под тикером, а следующая новость искала его по имени и читалась снова."""
+    keys = set()
+    tk = ((it.get("tickers") or [""])[0] or "").upper()
+    if tk:
+        keys |= {tk, _corp_norm(TICKER_NAME.get(tk, ""))}
+    keys.add(_corp_norm(name))
+    if name:   # имя без тикера — найти тикер по названию из списка
+        nn = _corp_norm(name)
+        keys |= {t for t, nm in TICKER_NAME.items() if nn and _corp_norm(nm) == nn}
+    keys.discard("")
+    return keys
+
+def _corp_repeat(it, typ, amount=None, name=""):
+    """True — это корпсобытие эмитента уже озвучено за 6 ч: сумма не названа, та же сумма на акцию или (для
+    дивидендов) названа ОБЩАЯ сумма (≥100 тыс ₽ — не на акцию). Иначе запоминает и False (озвучить)."""
+    keys = _corp_keys(it, name)
+    if not keys or not typ:
+        return False
+    now = time.time()
+    total = typ == "дивиденд" and amount is not None and amount >= 1e5
+    recs = [r for k in keys for r in [_corp_said.get((k, typ))] if r and now - r["t"] < _CORP_TTL]
+    # одна общая запись на эмитента: все его имена (и из прошлых новостей) указывают на неё
+    rec = {"t": now, "amounts": set().union(*(r["amounts"] for r in recs)) if recs else set()}
+    ids = {id(r) for r in recs}
+    group = keys | {k for (k, t), r in _corp_said.items() if t == typ and id(r) in ids}
+    repeat = bool(recs) and (amount is None or total or any(abs(amount - a) < 1e-6 for a in rec["amounts"]))
+    if not repeat and amount is not None and not total:
+        rec["amounts"].add(round(amount, 6))
+    for k in group:
+        _corp_said[(k, typ)] = rec
+    return repeat
+
+def _rub_total(v):
+    """3.5e9 -> «3,5 млрд рублей»."""
+    for k, w in ((1e9, "млрд"), (1e6, "млн"), (1e3, "тыс")):
+        if v >= k:
+            return f"{v / k:.2f}".rstrip("0").rstrip(".").replace(".", ",") + f" {w} рублей"
+    return f"{v:.0f} рублей"
+
+def _feed_tag(it):
+    """«TT, увидел +0.03 с, +0.6 с» — лента, когда монитор увидел новость и сколько прошло к решению
+    (от появления на странице)."""
+    seen, det = it.get("seen"), it.get("_detect")
+    if not seen:
+        return it.get("feed") or "TT"
+    return ((it.get("feed") or "TT") + (f", увидел +{det - seen / 1000:.2f} с" if det else "")
+            + f", +{time.time() - seen / 1000:.1f} с")
+
+def _log_repeat(it, why):
+    if nox_scenarios:
+        nox_scenarios._log(f"ПОВТОР [{it.get('feed') or 'TT'}]: не читаю — {why} | {it.get('text', '')[:110]}")
+
+def _read_worker():
+    """Чтение обычных новостей по очереди (порядок ленты сохраняется): белый список и повтор уже проверены;
+    умный отбор (если включён) может отсеять. Каждое решение — в nox_scenarios.log («УМНЫЙ ОТБОР: …»)."""
+    while True:
+        it, cfg = _read_q.get()
+        try:
+            if cfg.get("smart"):
+                ok, why = _smart_check(it, cfg)
+                if nox_scenarios:
+                    nox_scenarios._log(f"УМНЫЙ ОТБОР: {'читаю (' + why + ')' if ok else 'НЕ читаю — ' + why}"
+                                       f" [{_feed_tag(it)}] | {it.get('text', '')[:110]}")
+                if not ok:
+                    continue
+            if _mon_enabled() and not _focus.get("active"):
+                _read_last.append({"ts": time.time(), "text": it.get("text", ""), "hits": _match_why(it, cfg)})
+                _ipc_announce(_shorten(it)); time.sleep(0.4)
+        except Exception:
+            pass
+
+
 def _ollama_judge(text):
     """Умный отбор: важная новость -> краткая суть; иначе None. Ollama (модель со страницы «Мозг»), chat + few-shot."""
     import urllib.request
@@ -654,13 +1142,25 @@ def _lemmas(w):
         return frozenset([w])
     return frozenset(p.normal_form.replace("ё", "е") for p in m.parse(w)[:3])
 
+# однокоренные слова другой части речи: «блокировка» — и «заблокировал», «территории» — и «территориальные»
+# (критерии пользователя 15.10: блокировка активов, территориальные уступки)
+_DERIV = {"блокировка": ("блокир",), "блокировки": ("блокир",), "территории": ("территориальн",),
+          "территория": ("территориальн",)}
+
 @functools.lru_cache(maxsize=2000)
 def _phrase_parts(phrase):
     m = _morph_get()
     out = []
     for w in re.findall(r"[а-яa-z0-9]+", phrase.lower().replace("ё", "е")):
         known = bool(m) and len(w) > 3 and m.word_is_known(w)
-        out.append((w, _lemmas(w) if known else None))
+        # незнакомое словарю слово (≥6 букв) — по угаданной начальной форме: «допэмиссия» ловит «допэмиссию»
+        guess = bool(m) and not known and len(w) >= 6
+        lems = _lemmas(w) if (known or guess) else None
+        if lems and "Surn" in m.parse(w)[0].tag:
+            # фамилия — только как фамилия: «дмитриев» иначе ещё и «(нет) Дмитриев» от имени «Дмитрий», и «пресс-
+            # секретарь Дмитрий Песков» читался по слову «дмитриев» (16.10: пять новостей Кремля, хоккей)
+            lems = frozenset(x.normal_form.replace("ё", "е") for x in m.parse(w)[:3] if "Surn" in x.tag)
+        out.append((w, lems))
     return tuple(out)
 
 def _phrase_hit(phrase, low):
@@ -681,6 +1181,8 @@ def _phrase_hit(phrase, low):
             continue
         if any(t.startswith(w) for t in toks):
             continue
+        if w in _DERIV and any(r in t for t in toks for r in _DERIV[w]):
+            continue
         if lems:
             if lem_set is None:
                 lem_set = set().union(*(_lemmas(t) for t in toks)) if toks else set()
@@ -688,6 +1190,9 @@ def _phrase_hit(phrase, low):
                 continue
         return False
     return True
+
+# «с помощью санкций», «при помощи дронов» — предлог, а не «помощь» из белого списка
+_IDIOM = re.compile(r"(?<![а-я])(?:с|при)\s+(?:(?:его|ее|их|чьей|этой|своей|нашей)\s+)?помощ(?:ью|и)(?![а-я])")
 
 def _excluded(item, cfg):
     """Заголовок попал в «Не читать» (любая форма слова: «лимит» -> «лимитов», «закон» -> «законопроект»)."""
@@ -702,7 +1207,7 @@ def _match(item, cfg):
     tks = [t.upper() for t in (item.get("tickers") or [])]
     if cfg["tickers"] and any(t in cfg["tickers"] for t in tks):
         return True
-    low = (item.get("text", "") + " " + item.get("body", "")).lower().replace("ё", "е")
+    low = _IDIOM.sub(" ", (item.get("text", "") + " " + item.get("body", "")).lower().replace("ё", "е"))
     if cfg["phrases"] and any(_phrase_hit(p.replace("ё", "е"), low) for p in cfg["phrases"]):
         return True
     src = (item.get("source", "") or "").lower()
@@ -712,7 +1217,152 @@ def _match(item, cfg):
         return True
     return False
 
+# Факт макроданных из календаря Trading Tools: «US CORE CPI MOM ACTUAL 0.3% (FORECAST 0.2%, PREVIOUS 0.3%)».
+# 14.10 строка пришла через 8,7 с после релиза, а API BLS почти 2 минуты отвечал 503 (перегрузка на релизе) —
+# отдаём наблюдателям как данные BLS с ГОТОВЫМ числом (кто первый — API или лента — тот и сработал).
+# Только м/м базового ИПЦ: «BLS базовый ИПЦ» иначе совпало бы и с годовой строкой (2,6%).
+_TT_ACTUAL = [(re.compile(r"^\s*US\s+CORE\s+CPI\s+M[O/]M\s+ACTUAL\s+(-?\d+(?:[.,]\d+)?)\s*%", re.I),
+               "базовый ИПЦ США м/м")]
+
+def _tt_actual_items(items):
+    out = []
+    for it in items:
+        for rx, name in _TT_ACTUAL:
+            m = rx.search(it.get("text", "") or "")
+            if m:
+                v = float(m.group(1).replace(",", "."))
+                fd = it.get("feed") or "TT"
+                out.append({**it, "text": f"BLS: {name} (лента {fd}): {v:+.1f}%", "body": "", "value": v, "source": fd})
+                if nox_scenarios:
+                    nox_scenarios._log(f"ЛЕНТА {fd} -> наблюдатели: {name} = {v} («{it.get('text', '')[:70]}»)")
+    return out
+
+def _div_items(items):
+    """Решение СД/собрания о дивидендах в раскрытии ЦРКИ -> новость с ГОТОВЫМ числом (руб на акцию) для наблюдателей:
+    заголовок у таких раскрытий пустой («Решения совета директоров»), сумма и отсечка — в длинном теле."""
+    out = []
+    try:
+        import nox_divdisc
+    except Exception:
+        return out
+    for it in items:
+        try:
+            d = nox_divdisc.parse(it.get("text", ""), it.get("body", ""), it.get("tickers"), TICKER_NAME)
+        except Exception:
+            d = None
+        if not d or d.get("amount") is None:
+            continue
+        tk = d.get("ticker") or ""
+        out.append({**it, "text": f"{d['who']} {tk}: {d['verb']} дивиденды {d['amount']:g} руб на акцию",
+                    "body": "", "value": float(d["amount"]), "source": "ЦРКИ"})
+        if nox_scenarios:
+            nox_scenarios._log(f"ДИВИДЕНДЫ (раскрытие) -> наблюдатели: {d['who']} {tk} = {d['amount']:g} руб, "
+                               f"отсечка {d.get('record') or '?'}")
+    return out
+
+def _news_key(text):
+    return nox_dedup.key(text) if nox_dedup else (text or "")[:80]
+
+_DISC_SRC = re.compile(r"црки|disclosure", re.I)
+
+def _item_key(it):
+    """Ключ «уже видели в ленте»: текст без регистра/знаков/подписи источника. У раскрытий ЦРКИ/e-disclosure
+    заголовок ОДИН на всех («Решения совета директоров (наблюдательного совета)») — с ключом только по заголовку
+    второе и третье раскрытие за день (Куйбышевазот, Самараэнерго, Циан…) молча отбрасывались как «уже было».
+    Для них в ключ — первый тикер и начало тела."""
+    k = _news_key(it.get("text", ""))
+    if _DISC_SRC.search(it.get("source") or ""):
+        # тело в ключ НЕ берём: оно подгружается/раскрывается позже — та же новость казалась новой (16.10, ВИ.ру)
+        k += "|" + ((it.get("tickers") or [""])[0] or "").upper()
+    return k
+
+_STOCKSI_OLD = re.compile(r"вчера|\d{1,2}\.\d{1,2}|январ|феврал|март|апрел|ма[яй]|июн|июл|август|сентябр|октябр|ноябр|декабр", re.I)
+
+def _stale(it):
+    """Старая новость второй ленты («Вчера, 18:40», «Сегодня, 10:05» при 10:30): Stocksi держит сотни новостей;
+    если строка перерисовалась/поменялась — это не свежая новость (наблюдатели и голос её не получают)."""
+    ts = it.get("time") or ""
+    if not ts:
+        return False
+    if _STOCKSI_OLD.search(ts):
+        return True
+    m = re.search(r"(\d{1,2}):(\d{2})", ts)
+    if not m:
+        return False                        # «только что» и т.п. — свежая
+    now = time.localtime()
+    return (now.tm_hour * 60 + now.tm_min) - (int(m.group(1)) * 60 + int(m.group(2))) > 15
+
+# --- гонка лент (Trading Tools vs Stocksi): кто первым показал одну и ту же новость и на сколько секунд.
+# Время — момент появления строки на странице (MutationObserver, часы страницы одни на обе ленты).
+RACE_FILE = r"C:\jarvis-voice\feed_race.jsonl"
+_race = {}                 # key -> {feed, seen, text, tickers, disc, t, also:set}
+_race_recent = []          # [(t, key, sig)] — для сравнения по смыслу (та же новость другими словами)
+_race_only = {}            # feed -> сколько новостей было ТОЛЬКО в этой ленте (копится до сброса в файл)
+_race_last_purge = [0.0]
+
+def _race_write(rec):
+    try:
+        with open(RACE_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def _race_pair(e, feed2, seen2, text2):
+    lag = (seen2 - e["seen"]) / 1000.0
+    first, second = (e["feed"], feed2) if lag >= 0 else (feed2, e["feed"])
+    _race_write({"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "first": first, "second": second,
+                 "lag_s": round(abs(lag), 2), "text": e["text"][:110], "text2": (text2 or "")[:110]})
+
+def _race_same(e, sig, it):
+    if e["disc"] or _DISC_SRC.search(it.get("source") or ""):
+        # раскрытия: заголовок общий у всех компаний — одна и та же, только если тот же эмитент
+        tk = ((it.get("tickers") or [""])[0] or "").upper()
+        return bool(tk) and e["tk"] == tk and nox_dedup.similar(e["sig"], sig)
+    return nox_dedup.similar(e["sig"], sig)
+
+def _race_note(key, it, is_new):
+    """is_new: ключ впервые в ленте (новая формулировка). Иначе — та же строка уже была: в другой ленте?"""
+    try:
+        feed = it.get("feed") or "TT"
+        now = time.time()
+        seen = it.get("seen") or now * 1000
+        e = _race.get(key)
+        if e is not None:
+            if feed not in e["also"]:
+                e["also"].add(feed)
+                _race_pair(e, feed, seen, it.get("text", ""))
+                return True
+            return False
+        if not is_new or not nox_dedup:
+            return False
+        sig = nox_dedup.sig(it.get("text", ""))
+        e = {"feed": feed, "seen": seen, "text": it.get("text", "")[:120], "t": now, "also": {feed}, "sig": sig,
+             "tk": ((it.get("tickers") or [""])[0] or "").upper(), "disc": bool(_DISC_SRC.search(it.get("source") or ""))}
+        _race[key] = e
+        for (_t0, k0, _s0) in reversed(_race_recent):
+            e0 = _race.get(k0)
+            if e0 and e0["feed"] != feed and feed not in e0["also"] and _race_same(e0, sig, it):
+                e0["also"].add(feed); e["also"].add(e0["feed"])
+                _race_pair(e0, feed, seen, it.get("text", ""))
+                break
+        _race_recent.append((now, key, sig))
+        if now - _race_last_purge[0] > 60:
+            _race_last_purge[0] = now
+            for k in [k for k, x in _race.items() if now - x["t"] > 1200]:     # 20 мин — дальше не ждём
+                x = _race.pop(k)
+                if len(x["also"]) == 1:
+                    f = next(iter(x["also"]))
+                    _race_only[f] = _race_only.get(f, 0) + 1
+            _race_recent[:] = [r for r in _race_recent if now - r[0] <= 1200 and r[1] in _race]
+            if _race_only:
+                _race_write({"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "only": dict(_race_only)})
+                _race_only.clear()
+    except Exception:
+        pass
+
 _seen_news = set()
+_handled = {}              # key -> время: новость взята в работу (чтение/событие/раскрытие) — повтор из другой ленты не нужен
+_primed = set()            # ленты, чья текущая страница уже запомнена (первый проход — без реакции)
 _event_q = queue.Queue()
 _focus = {"active": None}     # режим тишины: {"wid","reason","until","at"} или None
 
@@ -800,6 +1450,54 @@ def _focus_loop():
             pass
         time.sleep(1)
 
+_DIV_PS = [
+    re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:руб\w*|₽|р\.)?\s*/\s*акци", re.I),                      # «7/акция»
+    re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:руб\w*|₽|р\.|коп\w*)\s*(?:\d{1,2}\s*коп\w*\s*)?на\s+(?:одну\s+|1\s+|каждую\s+)?"
+               r"(?:обыкновенн\w+\s+|привилегированн\w+\s+)?акци", re.I),                          # «7 рублей на 1 акцию»
+    re.compile(r"дивиденд\w*[^.;!?]{0,60}?(\d{1,3}(?:[ \u00a0]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)\s*"
+               r"(?:млрд|млн|тыс)?\.?\s*(?:руб\w*|₽|р\.|коп\w*)", re.I),                            # «дивиденды 7 руб»
+]
+
+def _fast_div(it):
+    """Дивиденды ПРАВИЛАМИ, без мозга: сумма в заголовке и нет оговорок («может», «прогноз», «не выплачивать»)
+    -> событие сразу. Иначе None (разбирает мозг, как раньше)."""
+    try:
+        import nox_scenarios as _ns
+    except Exception:
+        return None
+    text = (it.get("text") or "").strip()
+    low = text.lower().replace("ё", "е")
+    if "дивиденд" not in low or _ns.HEDGE_RX.search(low):
+        return None
+    m = next((m for rx in _DIV_PS for m in [rx.search(text)] if m), None)
+    if not m:
+        return None
+    amt = _amount_rub(text[m.start(1):m.end()])
+    if not amt:
+        return None
+    tks = it.get("tickers") or []
+    who = _tk_name(tks[0]) if tks else ""
+    if not who:
+        sm = re.match(r"^\s*(?:\$?[A-Z]{3,6}\s+)?([^:]{2,40}):", text)
+        who = sm.group(1).strip() if sm else ""
+    if not who:
+        return None
+    if amt >= 1e5:
+        val = _rub_total(amt)
+    elif amt < 1:
+        val = f"{round(amt * 100)} коп"
+    else:
+        val = ("%.2f" % amt).rstrip("0").rstrip(".").replace(".", ",") + " руб"
+    return {"type": "дивиденд", "ticker": who, "value": val, "kw_type": "дивиденд", "fast": True}
+
+def HEDGE_OK(ev, text):
+    """Событие без оговорок (тот же критерий, что у шаблона озвучки)."""
+    try:
+        import nox_scenarios as _ns
+        return not _ns.HEDGE_RX.search((text or "").lower().replace("ё", "е"))
+    except Exception:
+        return True
+
 def _event_worker():
     """Корпсобытия по очереди (порядок новостей сохраняется): мозг извлекает тип/тикер/размер.
     Озвучиваем, только если мозг подтвердил ТОТ ЖЕ тип, что нашли слова; иначе новость идёт
@@ -809,21 +1507,39 @@ def _event_worker():
         try:
             import nox_scenarios as _ns
             text = it.get("text", "")
-            ev = _ns.extract_event(text)
+            ev = _fast_div(it) if _ns.event_type(text) == "дивиденд" else None
+            if ev:
+                _ns._log(f"СОБЫТИЕ дивиденд (правила, без мозга): {ev['ticker']} {ev['value']} | {text[:60]}")
+            else:
+                ev = _ns.extract_event(text, it.get("body", ""))
             if _focus.get("active"):
                 continue                    # разбор шёл до тишины — уже не озвучиваем
             if _ns.event_confirmed(ev):
-                if _mon_enabled() and not _is_dup(text):
-                    _ipc_announce(_ns.speak_event(ev)); time.sleep(0.4)
+                amt = _amount_rub(ev.get("value")) if ev.get("type") != "дефолт" else None
+                if not ev.get("report") and _corp_repeat(it, ev.get("type"), amt, ev.get("ticker")):
+                    _log_repeat(it, f"{ev.get('type')} {_corp_issuer(it, ev.get('ticker'))} уже озвучен(а)")
+                    continue
+                if _mon_enabled() and not _is_dup(text, smart=False):
+                    # шаблон «Дивиденды Новатэк: 35 руб.» — только чёткое событие с суммой; новость с оговоркой
+                    # («решение пока не принято», «может выплатить») или без суммы — заголовком целиком
+                    if ev.get("type") == "дивиденд" and amt and amt >= 1e5 and not HEDGE_OK(ev, text):
+                        _read_q.put((it, cfg))
+                    elif ev.get("type") == "дивиденд" and amt and amt >= 1e5:
+                        # «ВИ.ру: дивиденды 3 500 000 000 рублей» — это вся выплата, не на акцию
+                        _ipc_announce(f"{ev.get('ticker') or ''}: на дивиденды направят {_rub_total(amt)}.".lstrip(": "))
+                        time.sleep(0.4)
+                    elif _ns.event_speakable(ev, text):
+                        _ipc_announce(_ns.speak_event(ev)); time.sleep(0.4)
+                    else:
+                        _read_q.put((it, cfg))   # оговорки/прогнозы — через умный отбор (критерий «только факт»)
             elif _mon_enabled() and _match(it, cfg) and not _is_dup(text):
-                _ipc_announce(_shorten(it)); time.sleep(0.4)
+                _read_q.put((it, cfg))
         except Exception:
             pass
 
 def _monitor_loop():
     _ready.wait(90)
     time.sleep(3)
-    first = True
     while True:
         try:
             if not _state["ok"]:
@@ -835,22 +1551,46 @@ def _monitor_loop():
                 continue
             cfg = _load_filter()
             smart = cfg.get("smart")
+            _names_load()
             new_items = []
-            # ключ без регистра/знаков/подписи источника: «ТРАМП: …» и «Трамп: …» — одна новость
-            _key = (lambda x: nox_dedup.key(x)) if nox_dedup else (lambda x: x[:80])
-            for it in items:                    # newest first
-                key = _key(it["text"])
-                if key in _seen_news:
+            # ключ без регистра/знаков/подписи источника: «ТРАМП: …» и «Трамп: …» — одна новость (и в обеих лентах)
+            # лента, которой ещё не было на странице (старт ридера / виджет Stocksi только что добавили): её текущие
+            # новости — старые; запоминаем без реакции, иначе вся лента разом «свежая» (чтение пачкой, наблюдатели)
+            fresh = {it.get("feed") or "TT" for it in items} - _primed
+            for it in items:                    # newest first (в каждой ленте)
+                key = _item_key(it)
+                if (it.get("feed") or "TT") in fresh or _stale(it):
+                    if key not in _seen_news and not _stale(it):   # уже висящие в ленте — в память для ответов, без озвучки
+                        _news_recent.append((time.time(), it.get("text", "")[:300], tuple(it.get("tickers") or ())))
+                    _seen_news.add(key)
+                    continue
+                is_new = key not in _seen_news
+                twin = _race_note(key, it, is_new)
+                it["_key"] = key
+                if is_new:
+                    _news_recent.append((time.time(), it.get("text", "")[:300], tuple(it.get("tickers") or ())))
+                if not is_new:
+                    if twin and key not in _handled:
+                        # та же строка из другой ленты, а первую версию в работу не взяли: у этой может быть тело
+                        # («…вести переговоры о продаже…» у TT, у Stocksi — пусто) — разобрать заново
+                        it["_repeat"] = True
+                        new_items.append(it)
+                    elif twin and _mon_enabled() and _match(it, cfg):
+                        _log_repeat(it, "та же строка")
                     continue
                 _seen_news.add(key)
-                if not first:
-                    new_items.append(it)
-            first = False
+                new_items.append(it)
+            _primed.update(fresh)
+            if len(_handled) > 5000:
+                for k in [k for k, t in _handled.items() if time.time() - t > 3600]:
+                    _handled.pop(k, None)
+            # две ленты — по моменту появления на странице, новые первыми (наблюдатели разбирают с конца)
+            new_items.sort(key=lambda x: -(x.get("seen") or 0))
             if len(_seen_news) > 5000:
                 # НЕ очищать целиком: иначе вся текущая лента (до 40 новостей) разом станет «свежей» —
                 # повторное чтение пачкой и ложные срабатывания наблюдателей. Оставляем только текущую ленту.
                 _seen_news.clear()
-                _seen_news.update(_key(it["text"]) for it in items)
+                _seen_news.update(_item_key(it) for it in items)
             _t_detect = time.time()
             for it in new_items:
                 it["_detect"] = _t_detect
@@ -865,7 +1605,10 @@ def _monitor_loop():
                 if _feat("watchers"):
                     try:
                         import nox_watchers
-                        nox_watchers.on_news(new_items, "trading")   # «мультимозг»: наблюдатели на 1 новость
+                        # факт макроданных из ленты TT — первым, с готовым числом
+                        # готовые числа (лента TT, раскрытия о дивидендах) — В КОНЕЦ: on_news идёт с конца, и
+                        # наблюдатель «один раз» должен получить число раньше исходной новости без числа
+                        nox_watchers.on_news(new_items + _tt_actual_items(new_items) + _div_items(new_items), "trading")
                     except Exception:
                         pass
             # Всегда-он разбор ключевых событий (дивиденд/оферта/допэмиссия/дефолт/выкуп):
@@ -883,6 +1626,24 @@ def _monitor_loop():
                 except Exception:
                     disc = None
                 if disc:
+                    _handled[it.get("_key")] = time.time()
+                    try:
+                        import nox_divdisc
+                        dd = nox_divdisc.parse(it.get("text", ""), it.get("body", ""), it.get("tickers"), TICKER_NAME)
+                    except Exception:
+                        dd = None
+                    if dd:
+                        d_amt, d_who = dd.get("amount"), dd.get("who")
+                    elif re.search(r"дивиденд", disc, re.I):
+                        # раскрытие о дивидендах без разобранного решения («…8 руб./ао — раскрытие», «собрание
+                        # рассмотрит дивиденды») — сумма из самой фразы, если есть
+                        m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:руб|коп)", disc)
+                        d_amt, d_who = (_amount_rub(disc[m.start():]) if m else None), disc.split(":", 1)[0]
+                    else:
+                        d_amt = d_who = None
+                    if (dd or d_who) and _corp_repeat(it, "дивиденд", d_amt, d_who):
+                        _log_repeat(it, f"дивиденды {_corp_issuer(it, d_who)} уже озвучены")
+                        continue
                     # заседание совета/собрания с важной повесткой — читаем всегда (как корпсобытия)
                     if _mon_enabled() and not _is_dup(disc):
                         _ipc_announce(disc); time.sleep(0.4)
@@ -894,17 +1655,19 @@ def _monitor_loop():
                 except Exception:
                     ev_typ = None
                 if ev_typ:
+                    _handled[it.get("_key")] = time.time()
                     # разбор мозгом (облако 4–9 с) — в фоне: опрос ленты не ждёт (раньше стоял на каждой
                     # «событийной» новости — в окне решения по ставке это задержало бы реакцию)
                     _event_q.put((it, cfg))
                     continue
-                if _mon_enabled():               # прочие новости — прежняя логика
-                    if smart:
-                        say = _ollama_judge(it.get("text", ""))
-                        if say and not _is_dup(it.get("text", "")):
-                            _ipc_announce(say); time.sleep(0.4)
-                    elif _match(it, cfg) and not _is_dup(it.get("text", "")):
-                        _ipc_announce(_shorten(it)); time.sleep(0.4)
+                # прочие новости: ТОЛЬКО белый список (тикеры/фразы/источники) и не повтор; умный отбор
+                # (если включён) лишь отсеивает нерыночное — в фоне, опрос ленты его не ждёт
+                if _mon_enabled() and _match(it, cfg):
+                    _handled[it.get("_key")] = time.time()
+                    if not _is_dup(it.get("text", "")):
+                        _read_q.put((it, cfg))
+                    else:
+                        _log_repeat(it, "похожая уже была")
         except Exception:
             pass
         # было 2 с: на новость реагируем быстрее; в окне решения по ставке (−5 с…+3 мин) — 0.1 с
@@ -912,7 +1675,37 @@ def _monitor_loop():
             fast = bool(nox_watchers and nox_watchers.fast_window())
         except Exception:
             fast = False
-        time.sleep(0.1 if fast else 0.5)
+        # ждём сигнала «новая строка» из страницы (_ping_loop) — или опрос по таймеру, если сигнала нет
+        _news_wake.wait(0.1 if fast else 0.5)
+        _news_wake.clear()
+
+_news_wake = threading.Event()
+
+def _ping_loop():
+    """Свой CDP-канал к вкладке терминала: binding noxNewsPing — MutationObserver лент (MON_JS) зовёт его на
+    каждую новую строку, и монитор просыпается сразу (было: до 0,5 с ожидания следующего опроса)."""
+    import asyncio
+    import urllib.request
+    async def session():
+        import websockets
+        tabs = json.load(urllib.request.urlopen(CDP_URL + "/json", timeout=5))
+        t = next((x for x in tabs if x.get("type") == "page" and TERMINAL_MATCH in (x.get("url") or "")), None)
+        if not t:
+            raise RuntimeError("нет вкладки терминала")
+        async with websockets.connect(t["webSocketDebuggerUrl"], max_size=50_000_000, open_timeout=10,
+                                      ping_interval=20) as ws:
+            await ws.send(json.dumps({"id": 1, "method": "Runtime.addBinding", "params": {"name": "noxNewsPing"}}))
+            async for raw in ws:
+                m = json.loads(raw)
+                if m.get("method") == "Runtime.bindingCalled" and m["params"].get("name") == "noxNewsPing":
+                    _news_wake.set()
+    _ready.wait(120)
+    while True:
+        try:
+            asyncio.run(session())
+        except Exception:
+            pass
+        time.sleep(3)
 
 # ------------------------------------------------------------------ matching (календарь)
 COUNTRY_TICKERS = {}  # события РФ по тикеру — сопоставление по подстроке
@@ -971,6 +1764,75 @@ _ROW_DUMP_JS = r"""
 }
 """
 
+@app.get("/memory_get")
+def memory_get():
+    import nox_memory
+    return {"ok": True, **nox_memory.load(), "prompt": nox_memory.block()}
+
+
+@app.get("/memory_save")
+def memory_save(json_data: str = ""):
+    import nox_memory
+    try:
+        d = nox_memory.save(json.loads(json_data or "{}"))
+    except Exception as e:
+        return {"ok": False, "text": f"Не сохранил память: {type(e).__name__}"}
+    return {"ok": True, **d, "prompt": nox_memory.block()}
+
+
+@app.get("/vision_shot")
+def vision_shot(q: str = ""):
+    """Проверка зрения БЕЗ отправки в облако: какой экран снимется и сколько весит снимок."""
+    try:
+        import nox_vision
+        t0 = time.time()
+        jpeg, where = nox_vision.grab(q)
+        return {"ok": True, "where": where, "kb": len(jpeg) // 1024, "ms": int((time.time() - t0) * 1000),
+                "monitors": nox_vision.monitors(), "match": bool(nox_vision.VISION_RE.search((q or "").lower())),
+                "enabled": _feat("vision")}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)}
+
+
+@app.get("/feed_race")
+def feed_race(day: str = ""):
+    """Гонка лент: какая (Trading Tools / Stocksi) первой показала одну и ту же новость и на сколько секунд."""
+    day = day or time.strftime("%Y-%m-%d")
+    pairs, only = [], {}
+    try:
+        with open(RACE_FILE, encoding="utf-8") as f:
+            for ln in f:
+                try:
+                    r = json.loads(ln)
+                except Exception:
+                    continue
+                if not str(r.get("ts", "")).startswith(day):
+                    continue
+                if "only" in r:
+                    for k, v in r["only"].items():
+                        only[k] = only.get(k, 0) + v
+                else:
+                    pairs.append(r)
+    except FileNotFoundError:
+        pass
+    for x in _race.values():                       # ещё не сброшенные в файл (последние 20 мин)
+        if len(x["also"]) == 1 and time.strftime("%Y-%m-%d", time.localtime(x["t"])) == day:
+            f1 = next(iter(x["also"]))
+            only[f1] = only.get(f1, 0) + 1
+    for k, v in _race_only.items():
+        only[k] = only.get(k, 0) + v
+    first, lead = {}, {}
+    for r in pairs:
+        first[r["first"]] = first.get(r["first"], 0) + 1
+        lead.setdefault(r["first"], []).append(r["lag_s"])
+    med = {k: sorted(v)[len(v) // 2] for k, v in lead.items()}
+    parts = [f"{k} первой {first[k]} раз (медиана на {med[k]:.1f} с раньше)" for k in sorted(first, key=lambda k: -first[k])]
+    text = (f"Общих новостей {len(pairs)}: " + ", ".join(parts) if pairs else "Общих новостей в двух лентах пока нет")
+    if only:
+        text += ". Только в одной ленте: " + ", ".join(f"{k} {v}" for k, v in sorted(only.items()))
+    return {"day": day, "pairs": len(pairs), "first": first, "median_lead_s": med, "only": only,
+            "last": pairs[-15:], "text": text + "."}
+
 @app.get("/mon_items")
 def mon_items(q: str = ""):
     """Отладка (только чтение): что монитор берёт из ленты — заголовок/тело/источник/тикеры — и полный текст строк."""
@@ -1021,7 +1883,7 @@ def web(q: str = ""):
     return {"text": _web_search(q)}
 
 @app.get("/web_answer")
-def web_answer(q: str = ""):
+def web_answer(q: str = "", extra: str = ""):
     """Поиск в интернете + ответ API-мозгом (погода, курс, факты, «посмотри в сети»)."""
     if not q.strip():
         return {"text": "Что найти, сэр?"}
@@ -1033,8 +1895,10 @@ def web_answer(q: str = ""):
         model = ns._appdb().get("openai_model") or None
         sysp = ("Ты голосовой ассистент. Ответь на вопрос пользователя КРАТКО по-русски (1-2 предложения), "
                 "опираясь на результаты веб-поиска ниже. Если есть конкретная цифра, курс или дата — назови её. "
-                "Не упоминай сам поиск и источники." + ns.SPEECH_RULES)
+                "Не упоминай сам поиск и источники." + ns.SPEECH_RULES + _memory_block())
         user = f"Вопрос: {q}\n\nРезультаты поиска:\n{results[:3500]}"
+        if extra:
+            user += f"\n\nДАННЫЕ ТЕРМИНАЛА (точнее поиска — цифры по инструментам бери отсюда):\n{extra}"
         ans = (ns._llm_model(sysp, user, model, max_tokens=160) if model
                else ns._llm(sysp, user, max_tokens=160)) or ""
         return {"text": ans.strip() or "Не нашёл точного ответа, сэр."}
@@ -1054,11 +1918,24 @@ _ROUTER_SYS = (
     '{"action":"explain_news"} — просит объяснить или про что последняя/эта новость.\n'
     '{"action":"local"} — это КОМАНДА программе: портфель, котировки, заявка/ордер, открой программу или сайт, '
     "заметка, напоминание, нагрузка компьютера, настройки. Их исполнит сама программа.\n"
-    "Если сомневаешься между answer и web — выбирай web. Отвечай ТОЛЬКО JSON."
+    "Если сомневаешься между answer и web — выбирай web. Отвечай ТОЛЬКО JSON.\n"
+    "Если к запросу приложены ДАННЫЕ ТЕРМИНАЛА (цена, изменение, позиция, свежие новости) и их хватает для ответа — "
+    "выбирай answer и бери цифры ТОЛЬКО оттуда; объясняй, что это значит для позиции и риска. "
+    "Если приложена ИСТОРИЯ РАЗГОВОРА, а запрос — её продолжение («а по Сберу?», «а почему?», «а что с ним?») — "
+    "пойми его по истории."
     " Текст в поле text — грамотным русским языком: правильные падежи и окончания, числа согласованы "
     "со словами, иностранные названия по-русски, без латиницы и эмодзи."
 )
 _LOCAL = "__LOCAL__"
+
+
+def _memory_block():
+    """Память Нокса (правила общения + факты о пользователе) для системной подсказки; вкладка «Память»."""
+    try:
+        import nox_memory
+        return nox_memory.block()
+    except Exception:
+        return ""
 
 def _brain_explain_news():
     news = last_news().get("text", "")
@@ -1068,7 +1945,7 @@ def _brain_explain_news():
         import nox_scenarios as ns
         model = ns._appdb().get("openai_model") or None
         sysp = ("Объясни простыми словами по-русски эту биржевую новость и почему она важна, 2-3 коротких предложения."
-                + ns.SPEECH_RULES)
+                + ns.SPEECH_RULES + _memory_block())
         ans = (ns._llm_model(sysp, news, model, max_tokens=160) if model else ns._llm(sysp, news, max_tokens=160)) or ""
         return ans.strip() or news
     except Exception:
@@ -1079,7 +1956,8 @@ def _brain_explain_news():
 _NEWS_FILLER = {"нокс", "следи", "следить", "последи", "за", "новостями", "новости", "новостей", "новость", "лентой", "ленту",
                 "ленты", "читай", "читать", "включи", "включить", "озвучивай", "озвучивать", "вслух", "пожалуйста",
                 "все", "всеми", "всё", "давай", "начни", "мне", "весь", "день", "сегодня", "теперь", "снова", "опять",
-                "и", "а", "можешь", "можно", "отслеживай", "новостную", "новостной", "биржевые", "биржевыми"}
+                "и", "а", "можешь", "можно", "отслеживай", "новостную", "новостной", "биржевые", "биржевыми",
+                "больше", "вообще", "пока", "сейчас"}
 _NEWS_OFF = {"не", "выключи", "выключить", "отключи", "хватит", "прекрати", "перестань", "стоп", "останови", "замолчи"}
 
 
@@ -1102,20 +1980,155 @@ _LOCAL_KW = ("портфел", "стакан", "заявк", "выставь", "
              "микрофон", "сценари", "статус торг", "аукцион", "на счету", "баланс")
 _WATCH_RE = re.compile(r"^(?:нокс[,\s]+)?(?:наблюдай|понаблюдай|последи\s+за|отслеживай|создай\s+наблюдател|"
                        r"добавь\s+наблюдател|следи\s+весь\s+день)")
+# Торговые команды — сразу программе (раньше «купи пять пик…» шло в облачный мозг: 2–5 с и риск ответа словами
+# «покупаю, сэр» без действия). Только в начале фразы: «стоит ли купить сбер?» остаётся вопросом мозгу.
+_TRADE_RE = re.compile(r"^(?:нокс[,\s]+)?(?:подготовь|подготовить|купи|продай|закрой|закрыть|выстав\w*|поставь\s+заявк|"
+                       r"отправь\s+заявк|исполни|соверши|сделай\s+сделк|открой\s+сделк|шортани|зашорть)(?![а-я])")
+# Правка наблюдателей/сценариев голосом: «выключи наблюдатель санкции», «поменяй объём в сценарии газпром на 10 лотов»
+_WEDIT_RE = re.compile(r"(?:включи|выключи|отключи|удали|измени|поменяй|смени|поставь|переименуй|переведи)\w*\s.*"
+                       r"(?:наблюдател|сценари)")
+
+
+def route_kind(t):
+    """Куда уйдёт фраза — БЕЗ исполнения (для fast_route и голосовых проверок voice_tests):
+    news_on / news_off — чтение ленты; vision; memory; watch_edit; watch; trade / local — программе (Rust);
+    brain — облачный маршрутизатор."""
+    low = (t or "").lower().strip()
+    nc = news_command(low)
+    if nc is not None:
+        return "news_on" if nc else "news_off"
+    try:
+        import nox_vision
+        if nox_vision.VISION_RE.search(low):
+            return "vision"
+    except Exception:
+        pass
+    try:
+        import nox_memory
+        if nox_memory.VOICE_RE.search(low):
+            return "memory"
+    except Exception:
+        pass
+    try:
+        import nox_feedback
+        if nox_feedback.kind(low):
+            return "news_feedback"
+    except Exception:
+        pass
+    try:
+        import nox_bond_rules
+        if nox_bond_rules.VOICE_RE.search(low):
+            return "bond_rule"
+    except Exception:
+        pass
+    if _WEDIT_RE.search(low):
+        return "watch_edit"
+    if _WATCH_RE.search(low):
+        return "watch"
+    if _TRADE_RE.search(low):
+        return "trade"
+    if any(k in low for k in _LOCAL_KW):
+        return "local"
+    return "brain"
 
 
 def fast_route(t):
     """Быстрый путь без мозга: «наблюдай …» -> наблюдатель, явная команда -> __LOCAL__, иначе None."""
-    low = (t or "").lower().strip()
-    if _WATCH_RE.search(low):
+    kind = route_kind(t)
+    if kind == "vision":                       # «что на экране?» — снимок в облако, только по запросу
+        if not _feat("vision"):
+            return "Зрение выключено во вкладке «Фичи», сэр."
+        import nox_vision
+        r = nox_vision.look(t)
+        (nox_scenarios._log if nox_scenarios else print)(f"ЗРЕНИЕ ({r.get('where', '?')}, {r.get('kb', '?')} КБ, {r.get('ms', '?')} мс): {r.get('text', '')[:160]}"
+            + (f" | ошибка: {r['error']}" if r.get("error") else ""))
+        return r.get("text") or None
+    if kind == "bond_rule":                    # «при дефолте самолета продай акции», «какие правила по облигациям»
+        try:
+            import nox_bond_rules
+            return nox_bond_rules.voice(t).get("text", "")
+        except Exception as e:
+            return f"Не смог разобрать правило по облигациям, сэр: {type(e).__name__}."
+    if kind == "news_feedback":                # «такие не читай» / «такие читай всегда» — про последнюю прочитанную
+        return news_feedback(t)
+    if kind == "memory":                       # «запомни правило: …», «что ты обо мне знаешь», «забудь, что …»
+        try:
+            import nox_memory
+            return nox_memory.voice(t).get("text", "")
+        except Exception:
+            return None
+    if kind == "watch_edit":
+        try:
+            import nox_watchers
+            return nox_watchers.edit_from_voice(t).get("text", "")
+        except Exception as e:
+            return f"Не смог изменить наблюдателя, сэр: {type(e).__name__}."
+    if kind == "watch":
         try:
             import nox_watchers
             return nox_watchers.add_from_voice(t).get("text", "")
         except Exception:
             return None
-    if any(k in low for k in _LOCAL_KW):
+    if kind in ("trade", "local"):
         return _LOCAL
     return None
+
+
+_LAST_CTX = {}
+_read_last = collections.deque(maxlen=30)       # прочитанные обычные новости: {"ts", "text", "hits"}
+
+_ANSWER_SYS = (
+    "Ты — Нокс, голосовой помощник трейдера на Мосбирже. Ответь на ЗАПРОС пользователя по-русски, коротко "
+    "(2–4 предложения), по ДАННЫМ ТЕРМИНАЛА: цены, изменения, позиции и новости бери ТОЛЬКО оттуда, ответь про ВСЕ "
+    "инструменты из запроса. Скажи, что это значит для позиции и риска. Если для ответа данных не хватает — честно "
+    "скажи, чего не хватает, ничего не выдумывай. Учитывай ИСТОРИЮ РАЗГОВОРА, если запрос — её продолжение."
+)
+
+
+def _route_log(act, t, t0, t1):
+    if nox_scenarios:
+        nox_scenarios._log(f"МОЗГ-РОУТЕР: {act} | данные {int((t1 - t0) * 1000)} мс, мозг "
+                           f"{int((time.time() - t1) * 1000)} мс | {t[:90]}")
+
+
+def news_feedback(t):
+    import nox_feedback
+    k = nox_feedback.kind(t)
+    last = next((x for x in reversed(_read_last) if time.time() - x["ts"] <= nox_feedback.WINDOW), None)
+    if not last:
+        return "Не помню, о какой новости речь, сэр: за последние десять минут я ничего не читал."
+    cfg = _load_filter()
+    keys = nox_feedback.apply(cfg, last["text"], last["hits"], k)
+    _save_filter(cfg)
+    if nox_scenarios:
+        nox_scenarios._log(f"РЕАКЦИЯ: {'не читать' if k == 'no' else 'читать'} такие ({', '.join(keys)}) | {last['text'][:110]}")
+    txt = nox_feedback.reply(k, keys, last["text"])
+    if not cfg.get("smart"):
+        txt += " Чтобы это работало, включите умный отбор на вкладке «Новости»."
+    return txt
+
+
+def _brain_request(t):
+    """Запрос для мозга: история разговора за 15 минут + живые данные терминала + сам запрос."""
+    hist = _dialog_text(t)
+    try:
+        ctx = _live_context(t)
+    except Exception:
+        ctx = ""
+    _LAST_CTX.update(ctx=ctx, hist=hist, t=t, ts=time.time())
+    parts = []
+    if hist:
+        parts.append(f"ИСТОРИЯ РАЗГОВОРА (последние {DIALOG_MIN} минут):\n{hist}")
+    if ctx:
+        parts.append(f"ДАННЫЕ ТЕРМИНАЛА (сейчас {time.strftime('%H:%M')} МСК):\n{ctx}")
+    parts.append(f"ЗАПРОС: {t}")
+    return "\n\n".join(parts)
+
+
+@app.get("/brain_context")
+def brain_context(text: str = ""):
+    """Что получит мозг на этот запрос (проверка): история + данные терминала. Мозг НЕ вызывается."""
+    return {"request": _brain_request(text), "dialog_rows": len(_dialog), "news_rows": len(_news_recent)}
 
 
 @app.get("/route")
@@ -1131,19 +2144,33 @@ def route(text: str = ""):
     fr = fast_route(t)
     if fr is not None:
         return {"text": fr}
+    t0 = time.time()
     try:
         import nox_scenarios as ns
         model = ns._appdb().get("openai_model") or None
-        raw = (ns._llm_model(_ROUTER_SYS, t, model, max_tokens=220) if model
-               else ns._llm(_ROUTER_SYS, t, max_tokens=220))
+        user = _brain_request(t)                  # + история разговора за 15 минут и живые данные терминала
+        t1 = time.time()
+        if _LAST_CTX.get("ctx"):
+            # Вопрос про инструмент, а данные терминала уже есть — маршрутизатор не нужен: ОДИН запрос «ответь по
+            # данным» (раньше мозг часто выбирал поиск в интернете: браузер + второй запрос = до 17 с и потеря части
+            # вопроса — «что с нефтью и долларом» отвечал только про нефть).
+            sysa = (_ANSWER_SYS + ns.SPEECH_RULES + _memory_block())
+            ans = (ns._llm_model(sysa, user, model, max_tokens=300) if model else ns._llm(sysa, user, max_tokens=300)) or ""
+            _route_log("данные", t, t0, t1)
+            if ans.strip():
+                return {"text": ans.strip()}
+        sysr = _ROUTER_SYS + _memory_block()       # правила общения и факты о пользователе — в текст ответа
+        raw = (ns._llm_model(sysr, user, model, max_tokens=260) if model
+               else ns._llm(sysr, user, max_tokens=260))
         j = ns._json_from(raw) or {}
     except Exception:
-        j = {}
+        j, t1 = {}, time.time()
     act = (j.get("action") or "local").lower()
+    _route_log(act, t, t0, t1)
     if act == "answer":
         return {"text": (j.get("text") or "").strip() or _LOCAL}
     if act == "web":
-        return {"text": web_answer(j.get("query") or t).get("text", "")}
+        return {"text": web_answer(j.get("query") or t, extra=_LAST_CTX.get("ctx", "")).get("text", "")}
     if act == "explain_news":
         return {"text": _brain_explain_news()}
     if act == "watch":
@@ -1401,6 +2428,21 @@ def filter_remove(kind: str = "phrase", q: str = ""):
     _save_filter(cfg)
     return {"text": say, "filter": cfg}
 
+@app.get("/filter_why")
+def filter_why(phrase: str = "", why: str = ""):
+    """Критерий для слова белого списка (зачем добавлено) — умный отбор решает по нему. Пусто — убрать."""
+    cfg = _load_filter()
+    w = cfg.setdefault("why", {})
+    if not phrase.strip():
+        return {"ok": True, "why": w}
+    if why.strip():
+        w[phrase.strip()] = why.strip()
+    else:
+        w.pop(phrase.strip(), None)
+    _save_filter(cfg)
+    return {"ok": True, "why": w}
+
+
 @app.get("/smart")
 def smart(on: int = -1):
     cfg = _load_filter()
@@ -1608,7 +2650,7 @@ def _plural(n):
     if 11 <= n <= 14: return "лотов"
     return {1: "лот", 2: "лота", 3: "лота", 4: "лота"}.get(n % 10, "лотов")
 
-_APP_DB = r"C:\Users\Дамир\AppData\Roaming\com.priler.jarvis\app.db"
+_APP_DB = os.path.join(os.environ.get("APPDATA") or os.path.expanduser(r"~\AppData\Roaming"), "com.priler.jarvis", "app.db")
 ORDER_JOURNAL = r"C:\jarvis-voice\order_journal.jsonl"
 
 _exec_last = {"val": None, "ts": 0.0}
@@ -1888,6 +2930,140 @@ def scn_show_all(id: str = ""):
            if not b.get("noop") and b.get("x") is not None]
     return {"ok": _spawn_marker(pts), "count": len(pts)}
 
+# ------------------------------------------------------------------ стрелки «Купить» / «Продать» на оверлее
+@app.get("/arrows_get")
+def arrows_get():
+    import nox_arrows
+    cfg = nox_arrows.load()
+    labels = {s: [nox_arrows.label(o) for o in cfg[s]["orders"]] for s in nox_arrows.SIDES}
+    cs = None
+    tab = (cfg.get("cscalp_tab") or "").strip()
+    if tab and nox_cscalp:
+        # вкладка CScalp: её текущий состав, открыта ли она сейчас, счета CScalp (только показать)
+        try:
+            hw, st, why = nox_cscalp.tab_window(tab, float("inf"))
+            acc = nox_cscalp.accounts()
+        except Exception as e:
+            hw, st, why, acc = None, [], f"{type(e).__name__}: {e}", {}
+        cs = {"tab": tab, "stacks": st, "open": bool(hw), "why": why, "accounts": acc}
+        for s in nox_arrows.SIDES:
+            act = "купить" if s == "buy" else "продать"
+            labels[s] = [l for o, l in zip(cfg[s]["orders"], labels[s]) if o.get("venue") != "cscalp"] + \
+                        [f"{act} {t} (CScalp «{tab}»)" for t in st]
+    return {"ok": True, **cfg, "labels": labels, "cscalp": cs}
+
+@app.get("/arrows_save")
+def arrows_save(json_data: str = ""):
+    import nox_arrows
+    try:
+        cfg = nox_arrows.save(json.loads(json_data or "{}"))
+    except Exception as e:
+        return {"ok": False, "text": f"Не сохранил стрелки: {e}"}
+    return {"ok": True, "text": "Стрелки сохранены.", **cfg}
+
+def _arrow_run(side, dry):
+    import nox_arrows
+    if side not in nox_arrows.SIDES:
+        return {"ok": False, "text": "Нет такой стрелки."}
+    cfg = nox_arrows.load()
+    if not dry and not cfg[side]["enabled"]:
+        return {"ok": False, "text": f"Стрелка «{nox_arrows.RU[side]}» выключена."}
+    cs_tab = (cfg.get("cscalp_tab") or "").strip()
+    if cs_tab and nox_cscalp:
+        # вкладка CScalp: ВСЕ стаканы, какие на ней сейчас (состав — из файла раскладки CScalp, в момент клика);
+        # список CScalp-заявок стрелки не используется. Жмёт execute_tab — только в окне, где вкладка открыта
+        st, why = nox_cscalp.tab_stacks(cs_tab)
+        if st is None:
+            return {"ok": False, "text": f"CScalp: {why}."}
+        seen, ph = {}, []
+        for t in st:
+            seen[t] = seen.get(t, 0) + 1
+            ph.append({"ticker": t, "side": side, "venue": "cscalp", "n": seen[t]})
+        cfg = dict(cfg)
+        cfg[side] = {**cfg[side], "orders": [o for o in cfg[side]["orders"] if o.get("venue") != "cscalp"] + ph}
+    if not cfg[side]["orders"]:
+        return {"ok": False, "text": f"У стрелки «{nox_arrows.RU[side]}» нет заявок."}
+    if not _state["ok"] and any(o.get("venue") != "cscalp" for o in cfg[side]["orders"]):
+        return {"ok": False, "text": _state.get("err") or "Терминал не подключён."}
+    w = nox_arrows.pseudo(cfg, (side,))
+    now = time.time()
+    res = _watch_exec(w, w["branches"][0], f"ручная стрелка «{nox_arrows.RU[side]}»", dry=dry,
+                      meta={"seen": now * 1000, "_detect": now}, cs_tab=cs_tab or None) or {}
+    if nox_scenarios:
+        nox_scenarios._log(f"СТРЕЛКА «{nox_arrows.RU[side]}»{' (проверка)' if dry else ''}: {res.get('text', '')}")
+    return {"ok": True, "text": res.get("text", "")}
+
+@app.get("/arrow_fire")
+def arrow_fire(side: str = ""):
+    """Нажата стрелка на оверлее: исполнить ВСЕ её заявки сразу (Т-Терминал и CScalp параллельно)."""
+    return _arrow_run(side, dry=False)
+
+@app.get("/cscalp_probe")
+def cscalp_probe(side: str = "buy"):
+    """Проба стрелки в CScalp БЕЗ нажатий: весь путь до клавиш (окно группы, планы, вывод окна вперёд, проверка
+    стаканов под точками) с замером шагов и ожидания в очереди рабочего потока."""
+    import nox_arrows
+    cfg = nox_arrows.load()
+    act = "buy_market" if side == "buy" else "sell_market"
+    tab = (cfg.get("cscalp_tab") or "").strip()
+    pairs = [(o["ticker"], act, o.get("n")) for o in cfg[side]["orders"] if o.get("venue") == "cscalp"]
+    if not pairs and not tab:
+        return {"ok": False, "text": "у стрелки нет стаканов CScalp"}
+    t_put = time.time()
+    box = {}
+    def job():
+        box["queue_ms"] = round((time.time() - t_put) * 1000)
+        if tab:
+            return nox_cscalp.execute_tab(tab, act, go=True, probe=True)
+        return nox_cscalp.execute_orders(pairs, go=True, probe=True)
+    r, e = nox_cscalp.submit(job, timeout=60)
+    return {"ok": not e, "error": e, "queue_ms": box.get("queue_ms"), "total_ms": round((time.time() - t_put) * 1000),
+            "steps": (r or {}).get("steps") or nox_cscalp._last_trace.get("steps"), "result_error": (r or {}).get("error"),
+            "targets": [(p.get("ticker"), p.get("hwnd"), p.get("point")) for p in (r or {}).get("results") or []]}
+
+@app.get("/cscalp_trace")
+def cscalp_trace():
+    """Где сейчас рабочий поток CScalp: шаги последнего execute_orders и стек потока (для зависаний)."""
+    import sys, traceback
+    th = next((t for t in threading.enumerate() if t.name == "cscalp"), None)
+    stack = traceback.format_stack(sys._current_frames().get(th.ident)) if th and th.ident in sys._current_frames() else []
+    return {"trace": nox_cscalp._last_trace if nox_cscalp else None, "queue": nox_cscalp._tasks.qsize() if nox_cscalp else None,
+            "stack": [s.strip()[:300] for s in stack[-12:]]}
+
+@app.get("/arrow_dry")
+def arrow_dry(side: str = ""):
+    """Проверка стрелки без нажатий: какие кнопки и стаканы она нажмёт."""
+    return _arrow_run(side, dry=True)
+
+@app.get("/arrow_layout")
+def arrow_layout():
+    """Разложить виджеты Т-Терминала для обеих стрелок на их вкладке (CScalp — стаканы открываете сами)."""
+    import nox_arrows
+    cfg = nox_arrows.load()
+    if not any(o.get("venue") != "cscalp" for s in nox_arrows.SIDES for o in cfg[s]["orders"]):
+        return {"ok": True, "text": "У стрелок нет заявок Т-Терминала — раскладывать нечего."}
+    if not _state["ok"]:
+        return {"ok": False, "text": _state.get("err") or "Терминал не подключён."}
+    return _watch_layout(nox_arrows.pseudo(cfg))
+
+@app.get("/watch_inject")
+def watch_inject(text: str = "", value: str = "", source: str = ""):
+    """Данные из официального API (BLS) — наблюдателям как новость с ГОТОВЫМ числом: ветка выбирается
+    сразу, без мозга. Текст начинается с «BLS:» — ключевое слово наблюдателя, лента его не содержит."""
+    if not nox_watchers:
+        return {"ok": False, "text": "Наблюдатели недоступны."}
+    try:
+        v = float(str(value).replace(",", "."))
+    except Exception:
+        v = None
+    now = time.time()
+    item = {"text": text, "body": "", "tickers": [], "source": source or "API", "seen": now * 1000, "_detect": now,
+            "value": v}
+    nox_watchers.on_news([item])
+    if nox_scenarios:
+        nox_scenarios._log(f"API -> наблюдатели: «{text}» значение={v} ({(time.time() - now) * 1000:.0f} мс)")
+    return {"ok": True, "value": v}
+
 @app.get("/scn_inject")
 def scn_inject(text: str = "", tickers: str = ""):
     """ПРОКЛАДКА для теста: подать виртуальную новость в движок как будто из ленты ТТ,
@@ -1945,6 +3121,42 @@ def brain_models():
             except Exception:
                 pass
     return out
+
+@app.get("/brain_model_set")
+def brain_model_set(model: str = ""):
+    """Сменить облачную модель мозга (как клик на странице «Мозг»): openai_model в app.db + reload_settings в Нокс.
+    Ридер запущен сторожем и видит НАСТОЯЩИЙ app.db (процессы из сессии Claude видят его копию)."""
+    model = (model or "").strip()
+    cat = brain_models().get("cloud") or []
+    if not model or (cat and model not in cat):
+        return {"ok": False, "text": f"Модели «{model}» нет в каталоге облака."}
+    import nox_scenarios as ns
+    try:
+        raw = open(ns._APPDB, "rb").read().decode("utf-8-sig")
+        d = json.loads(raw)
+        old = d.get("openai_model", "")
+        d["openai_model"] = model
+        tmp = ns._APPDB + ".tmp"
+        open(tmp, "w", encoding="utf-8").write(json.dumps(d, ensure_ascii=False, indent=2))   # UTF-8 без BOM
+        os.replace(tmp, ns._APPDB)
+    except Exception as e:
+        return {"ok": False, "text": f"Не записал настройки: {type(e).__name__}"}
+    try:   # Нокс перечитывает настройки с диска (голосовой мозг brain.rs)
+        s = socket.create_connection((IPC_HOST, IPC_PORT), timeout=5)
+        key = base64.b64encode(os.urandom(16)).decode()
+        s.sendall((f"GET / HTTP/1.1\r\nHost: {IPC_HOST}:{IPC_PORT}\r\nUpgrade: websocket\r\n"
+                   f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        s.recv(4096)
+        data = json.dumps({"action": "reload_settings"}).encode("utf-8")
+        mask = os.urandom(4)
+        s.sendall(bytes([0x81, 0x80 | len(data)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+        time.sleep(0.2); s.close()
+    except Exception:
+        pass
+    if nox_scenarios:
+        nox_scenarios._log(f"МОЗГ: облачная модель {old or '—'} -> {model}")
+    return {"ok": True, "old": old, "model": model, "text": f"Мозг переключён на {model}."}
+
 
 # ------------------------------------------------------------------ наблюдатели («мультимозг»)
 @app.get("/watch_list")
@@ -2026,7 +3238,76 @@ def _cscalp_exec_text(box, cs_orders, dry, enabled):
     return txt
 
 
-def _watch_exec(w, branch, news_text, dry=False, meta=None):
+def _watch_api_on():
+    """Тумблер «Заявки наблюдателей через API» во «Фичах»: только при явном true (тут реальные заявки)."""
+    try:
+        return bool(nox_features) and nox_features._load().get("watch_api") is True
+    except Exception:
+        return False
+
+def _watch_exec_api(w, orders, max_lots, max_rub, really):
+    """Заявки ветки через T-Invest API: тип (рыночная/лимитная), цена и объём — из виджета «Заявка» на вкладке
+    наблюдателя (их меняют в терминале), счёт — выбранный в терминале. Кнопку не нажимаем.
+    -> (results в формате press_orders, err)."""
+    import nox_tinvest
+    plan, err = _submit(lambda pg: nox_widgets.api_plan(pg, w.get("tab"), orders, max_lots, max_rub), timeout=20)
+    if err or not plan:
+        return None, err or "нет ответа"
+    acct = plan.get("account") or ""
+    res = []
+    for p in plan["plans"]:
+        o = p["order"]
+        if p.get("bind"):
+            o["wid"] = p["bind"]              # виджет найден по тикеру+объёму — дальше узнаём его по id
+        item = {"order": o, "ok": bool(p.get("ok")), "widget": p.get("widget"), "api": True}
+        if p.get("err"):
+            item["err"] = p["err"]
+        if not p.get("ok"):
+            res.append(item)
+            continue
+        inst = nox_tinvest.find_instrument(p["ticker"])
+        if not inst:
+            item.update(ok=False, err=f"нет инструмента {p['ticker']} в каталоге T-Invest")
+        elif not acct:
+            item.update(ok=False, err="не знаю счёт, выбранный в терминале")
+        elif not really:
+            item["dry"] = True
+        else:
+            t0 = time.time()
+            try:
+                ans = nox_tinvest.post_order(acct, inst, p["side"], p["qty"], p["otype"], p.get("price"))
+                st = (ans.get("executionReportStatus") or "").replace("EXECUTION_REPORT_STATUS_", "")
+                px = nox_tinvest.q(ans.get("executedOrderPrice"))
+                item["t_click"] = t0
+                item["api_ms"] = round((time.time() - t0) * 1000)
+                item["notes"] = [f"API {st}: {ans.get('lotsExecuted', 0)}/{p['qty']} лот"
+                                 + (f" по {px:g}" if px else "") + f", {item['api_ms']} мс"]
+                if st in ("REJECTED", "CANCELLED"):
+                    item.update(ok=False, err=f"API отклонил: {ans.get('message') or st}")
+            except Exception as e:
+                item.update(ok=False, err=f"API: {str(e)[:160]}")
+        res.append(item)
+    return res, None
+
+@app.get("/watch_api_dry")
+def watch_api_dry(tab: str = "нокс", ticker: str = "SBER", side: str = "buy", lots: int = 0, wid: str = ""):
+    """Проверка без заявки: что Нокс прочитал бы из виджета «Заявка» и что отправил бы через API (PostOrder НЕ зовём)."""
+    import nox_tinvest
+    o = {"ticker": ticker.upper(), "side": side, "n": 1, "lots": lots or None, "wid": wid or None}
+    enabled, max_lots, max_rub = _exec_settings()
+    t0 = time.time()
+    plan, err = _submit(lambda pg: nox_widgets.api_plan(pg, tab, [o], max_lots, max_rub), timeout=20)
+    if err or not plan:
+        return {"ok": False, "text": f"терминал: {err}"}
+    p = plan["plans"][0]
+    inst = nox_tinvest.find_instrument(p.get("ticker") or ticker) or {}
+    acct = plan.get("account") or ""
+    return {"ok": bool(p.get("ok")), "read_ms": round((time.time() - t0) * 1000), "account": "…" + acct[-4:] if acct else "",
+            "widget": p.get("widget"), "wid": p.get("wid"), "type": p.get("otype"), "price": p.get("price"),
+            "qty": p.get("qty"), "cost": p.get("cost"), "instrument": {k: inst.get(k) for k in ("ticker", "name", "class", "lot")},
+            "why": p.get("err") or "", "api_on": _watch_api_on(), "warm_rtt_ms": nox_tinvest._warm.get("rtt")}
+
+def _watch_exec(w, branch, news_text, dry=False, meta=None, cs_tab=None):
     """EXECUTOR для nox_watchers: нажать кнопки ветки на вкладке наблюдателя.
     Тумблер «исполнение» и лимиты — те же, что у голосовых заявок (Настройки → Т-Терминал).
     Заявки venue=cscalp идут в CScalp горячими клавишами (nox_cscalp) — параллельно с Т-Терминалом,
@@ -2044,13 +3325,23 @@ def _watch_exec(w, branch, news_text, dry=False, meta=None):
         elif not nox_cscalp:
             cs_box["err"] = "модуль CScalp не загружен"
         else:
-            pairs = [(o["ticker"], "buy_market" if o.get("side") == "buy" else "sell_market") for o in cs_orders]
+            # третий элемент — № стакана с этим тикером (два MIX на вкладке — №1 и №2); группа — из одного окна CScalp
+            pairs = [(o["ticker"], "buy_market" if o.get("side") == "buy" else "sell_market", o.get("n"))
+                     for o in cs_orders]
+            deadline = time.time() + 20      # позже — не жать (опоздавшая рыночная заявка хуже, чем никакой)
+            if cs_tab:     # стрелка привязана к вкладке CScalp: её текущий состав и только её окно
+                act = "buy_market" if cs_orders[0].get("side") == "buy" else "sell_market"
+                job = lambda: nox_cscalp.execute_tab(cs_tab, act, go=really, deadline=deadline)
+            else:
+                job = lambda: nox_cscalp.execute_orders(pairs, go=really, deadline=deadline)
             def _cs():
-                r, e = nox_cscalp.submit(lambda: nox_cscalp.execute_orders(pairs, go=really), timeout=25)
+                r, e = nox_cscalp.submit(job, timeout=25)
                 cs_box.update(res=r, err=e)
             cs_thread = threading.Thread(target=_cs, daemon=True)
             cs_thread.start()
-    if orders:
+    if orders and _watch_api_on():
+        res, err = _watch_exec_api(w, orders, max_lots, max_rub, really)   # пульт — виджет, исполнение — API
+    elif orders:
         res, err = _submit(lambda pg: nox_widgets.press_orders(pg, w.get("tab"), orders, max_lots, max_rub,
                                                                dry=not really), timeout=30)
     else:
@@ -2113,7 +3404,8 @@ def _watch_exec(w, branch, news_text, dry=False, meta=None):
     return {"text": txt + ".", "results": res, "cscalp": cs_box.get("res")}
 
 def _watch_layout(w):
-    res, err = _submit(lambda pg: nox_widgets.layout(pg, w), timeout=180)
+    peers = _watcher_tabs().get(w.get("tab") or w.get("name") or "")   # ряды всех наблюдателей вкладки
+    res, err = _submit(lambda pg: nox_widgets.layout(pg, w, peers), timeout=180)
     return res or {"ok": False, "text": f"Раскладка не удалась: {err}"}
 
 if nox_watchers and nox_widgets:
@@ -2131,29 +3423,354 @@ def _watcher_tabs():
         pass
     return out
 
+_persist = {}   # вкладка -> {"chk": когда проверяли, "bad": подряд несохранённых, "said": когда предупредили}
+
+def _persist_watch(tab, lost):
+    """Заявки вкладки наблюдателя не сохранены терминалом (его сбой после создания вкладки: до перезагрузки
+    страницы он ничего не сохраняет) — при F5 они пропадут, и наблюдателю будет нечего нажимать. Предупредить."""
+    st = _persist.setdefault(tab, {"bad": 0, "said": 0})
+    st["bad"] = st["bad"] + 1 if lost else 0
+    if st["bad"] >= 2 and time.time() - st["said"] > 1800 and not _focus.get("active"):
+        st["said"] = time.time()
+        _ipc_announce(f"Сэр, терминал не сохранил заявки на вкладке «{tab}» — при перезагрузке страницы они "
+                      f"пропадут. Нажмите «Разложить в терминале» у наблюдателя — я перезагружу терминал и разложу заново.")
+        nox_scenarios_log(f"СОХРАНЕНИЕ: вкладка «{tab}» — терминал не сохранил {lost}")
+
+def nox_scenarios_log(msg):
+    try:
+        import nox_scenarios as _ns
+        _ns._log(msg)
+    except Exception:
+        pass
+
+_guard = {"chk": 0.0}   # вкладка -> {"fix": когда восстанавливали, "said": когда предупреждали}
+
+_foreign = {"said": 0.0, "chk": 0.0}
+
+def _foreign_terminals():
+    """Окна «Терминал | Т-Инвестиции» НЕ из профиля браузера Нокса (yandex_jarvis): другой экземпляр терминала
+    шлёт на сервер Т-Банка свою раскладку вкладок и затирает виджеты наблюдателей (16.10: окно «2: Терминал»
+    в обычном профиле Яндекса записало «нокс» с одной лентой — заявки CNRU пропали)."""
+    import ctypes
+    try:
+        import psutil
+    except Exception:
+        return []
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def _cb(h, _l):
+        if user32.IsWindowVisible(h):
+            n = user32.GetWindowTextLengthW(h)
+            if n:
+                b = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(h, b, n + 1)
+                if "Т-Инвестиции" in b.value and "Терминал" in b.value:
+                    pid = ctypes.c_ulong()
+                    user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+                    found.append((pid.value, b.value))
+        return True
+
+    user32.EnumWindows(_cb, 0)
+    out = []
+    for pid, title in found:
+        try:
+            cmd = " ".join(psutil.Process(pid).cmdline())
+        except Exception:
+            cmd = ""
+        if "yandex_jarvis" not in cmd:
+            out.append(title)
+    return out
+
+def _foreign_watch():
+    """Раз в минуту: чужой терминал открыт — только запись в журнал (не чаще раза в 30 мин), БЕЗ голоса:
+    пользователь 17.10 — «это напоминание мне не надо» (пропавшие заявки и так восстанавливает сторож)."""
+    if time.time() - _foreign["chk"] < 60:
+        return
+    _foreign["chk"] = time.time()
+    try:
+        titles = _foreign_terminals()
+    except Exception:
+        return
+    if titles and time.time() - _foreign["said"] > 1800:
+        _foreign["said"] = time.time()
+        nox_scenarios_log(f"ЧУЖОЙ ТЕРМИНАЛ: открыт вне браузера Нокса — {titles} (может перезаписать раскладку вкладок)")
+
+def _orders_guard(active, saved, tabs):
+    """Заявки включённых наблюдателей пропали из раскладки терминала (сброс при перезагрузке страницы).
+    Пропали ВСЕ заявки наблюдателя и его вкладка открыта — разложить заново и сказать; вкладка не открыта
+    или пропала часть (например, вы поменяли объём руками) — предупредить. Раз в 10/30 мин на вкладку."""
+    if _focus.get("active"):
+        return                                   # режим тишины перед новостью по времени — ничего не трогаем
+    for tab, ws in tabs.items():
+        en = [w for w in ws if w.get("enabled", True) and nox_widgets.needed_orders(w)]
+        if not en or tab not in saved:
+            continue
+        st = _guard.setdefault(tab, {"fix": 0, "said": 0})
+        if saved[tab] is None:                   # вкладки нет вовсе (удалили) — разложить может только «Разложить»
+            if time.time() - st["said"] > 1800:
+                st["said"] = time.time()
+                _ipc_announce(f"Сэр, вкладки «{tab}» в терминале нет — наблюдателю «{en[0].get('name')}» нечего "
+                              f"нажимать. Нажмите «Разложить в терминале».")
+            continue
+        due = time.time() - st["fix"] > 600      # одно окно на вкладку: восстанавливаем всех её наблюдателей сразу
+        for w in en:
+            miss = nox_widgets.missing_orders(w, saved[tab])
+            if not miss:
+                continue
+            what = ", ".join(f"{t} ×{q}" for t, q in miss)
+            whole = len(miss) == len(nox_widgets.needed_orders(w))
+            if whole and tab == active and due:
+                st["fix"] = time.time()
+                nox_scenarios_log(f"СТОРОЖ ЗАЯВОК: вкладка «{tab}» — пропали {what}, раскладываю заново")
+                r = _watch_layout(w)
+                _ipc_announce(f"Сэр, терминал сбросил заявки на вкладке «{tab}» — разложил заново. {r.get('text', '')}")
+            elif time.time() - st["said"] > 1800:
+                st["said"] = time.time()
+                nox_scenarios_log(f"СТОРОЖ ЗАЯВОК: вкладка «{tab}», наблюдатель «{w.get('name')}» — нет {what}")
+                tail = ("эти ветки ничего не нажмут. Нажмите «Разложить в терминале» или поправьте объём." if not whole
+                        else "не получилось разложить заново — нажмите «Разложить в терминале»." if tab == active
+                        else "откройте вкладку, я разложу их заново.")
+                _ipc_announce(f"Сэр, на вкладке «{tab}» нет заявок наблюдателя «{w.get('name')}»: {what} — {tail}")
+
+def _persist_wids(bind):
+    """[(id наблюдателя, № ветки, № заявки, id виджета)] -> записать в nox_watchers.json. Под замком срабатывания:
+    иначе запись «наблюдатель сработал/выключен» могла бы затереться старой копией."""
+    try:
+        with nox_watchers._on_news_lock:
+            d = nox_watchers.load()
+            changed = False
+            for wid_, bi, oi, xid in bind:
+                w = next((x for x in d["watchers"] if x.get("id") == wid_), None)
+                try:
+                    o = w["branches"][bi]["orders"][oi]
+                except Exception:
+                    continue
+                if o.get("wid") != xid:
+                    o["wid"] = xid
+                    changed = True
+            if changed:
+                nox_watchers.save(d)
+    except Exception:
+        pass
+
 def _overlay_loop():
-    """Подписи веток на вкладке наблюдателя: перерисовка раз в 3с (виджеты двигают, страницу обновляют)."""
+    """Подписи веток на вкладке наблюдателя: перерисовка раз в 3с (виджеты двигают, страницу обновляют).
+    Раз в минуту — сверка заявок вкладки с сохранённой раскладкой терминала (_persist_watch) и сторож
+    пропавших заявок наблюдателей (_orders_guard)."""
     _ready.wait(120)
     while True:
         try:
             if _state["ok"] and nox_widgets and nox_watchers:
                 tabs = _watcher_tabs()
+                chk = time.time() - _guard["chk"] > 60
+                if chk:
+                    _guard["chk"] = time.time()
                 def _draw(pg):
-                    w = tabs.get(nox_widgets.active_tab(pg))
+                    tab = nox_widgets.active_tab(pg)
+                    w = tabs.get(tab)
+                    out = {"tab": tab}
                     if w:
-                        return nox_widgets.draw_overlay(pg, w)
-                    nox_widgets.clear_overlay(pg); return 0
-                _submit(_draw, timeout=10)
+                        nox_widgets.draw_overlay(pg, w)
+                        # запомнить id виджетов заявок (объём/тип/цену потом можно менять — наблюдатель узнает свой)
+                        out["bind"] = nox_widgets.bind_plan(pg, w)
+                        if chk:
+                            out["unsaved"] = nox_widgets.unsaved(pg)
+                    else:
+                        nox_widgets.clear_overlay(pg)
+                    if chk and tabs:
+                        out["saved"] = nox_widgets.saved_tabs(pg, list(tabs))
+                    return out
+                res, _err = _submit(_draw, timeout=10)
+                if res and res.get("bind"):
+                    _persist_wids(res["bind"])
+                if res and res.get("unsaved") is not None:
+                    _persist_watch(res["tab"], res["unsaved"])
+                if res and res.get("saved"):
+                    _orders_guard(res["tab"], res["saved"], tabs)
+                _foreign_watch()
         except Exception:
             pass
         time.sleep(3)
+
+def _nsd_event(ev):
+    """Новое сообщение НРД о неисполнении/ненадлежащем исполнении по облигации: наблюдателям и голосом."""
+    import nox_nsd
+    item = nox_nsd.feed_item(ev)
+    say = nox_nsd.summary(ev)
+    short = nox_nsd._issuer_short(ev.get("issuer", ""))
+    exp = {}
+    try:                                         # что у пользователя по эмитенту (только чтение)
+        import urllib.request as _ur, urllib.parse as _up
+        exp = json.loads(_ur.urlopen("http://127.0.0.1:8124/nsd_exposure?" + _up.urlencode(
+            {"isin": ev.get("isin", ""), "issuer": short}), timeout=15).read().decode("utf-8"))
+    except Exception:
+        exp = {}
+    held = bool(exp.get("bond") or exp.get("issuer_bonds") or (exp.get("share") or {}).get("qty"))
+    if exp.get("text"):
+        say = f"{say} {exp['text']}"
+    rules = []
+    try:
+        import nox_bond_rules
+        rules = [r for r in nox_bond_rules.load()["rules"] if nox_bond_rules.matches(r, ev, short)]
+    except Exception:
+        rules = []
+    if nox_scenarios:
+        nox_scenarios._log(f"НРД: {say} | {ev.get('isin')} | {ev.get('url')} | правил: {len(rules)}")
+    if rules:
+        threading.Thread(target=_bond_rules_run, args=(rules, ev, exp, say), daemon=True).start()
+    if _feat("watchers") and nox_watchers:
+        try:
+            nox_watchers.on_news([item], "trading")     # сценарии по облигациям: «НРД» + эмитент/ISIN + статус
+        except Exception:
+            pass
+    try:
+        # свои бумаги или правило «предупредить» — озвучиваем, даже если чтение ленты выключено
+        important = held or any(r.get("action") == "alert" for r in rules)
+        if not _focus.get("active") and not _is_dup(item["text"], smart=False) and (
+                important or (_mon_enabled() and not _excluded(item, _load_filter()))):
+            _ipc_announce(("Внимание! " if important else "") + say)
+    except Exception:
+        pass
+
+
+def _bond_rules_run(rules, ev, exp, say):
+    """Сценарии по облигациям: заявки — тем же путём, что голосовые (fill_order: тумблер исполнения и лимиты)."""
+    import nox_bond_rules
+    for r in rules:
+        if r.get("action") == "alert":
+            continue
+        orders, why = nox_bond_rules.plan(r, ev, exp)
+        if not orders:
+            _ipc_announce(f"Правило по облигациям: {why}")
+            continue
+        for o in orders:
+            try:
+                res = fill_order(q=o["q"], side=o.get("side", "sell"), qty=int(o.get("qty") or 1), price=0.0,
+                                 close=int(o.get("close") or 0), exec=1 if r.get("exec") else 0,
+                                 said=f"правило по облигациям {r.get('issuer')}: {say[:120]}")
+                txt = res.get("text", "")
+            except Exception as e:
+                txt = f"не смог: {type(e).__name__}"
+            if nox_scenarios:
+                nox_scenarios._log(f"НРД-ПРАВИЛО: {nox_bond_rules.describe(r)} | {o} | {txt[:160]}")
+            _ipc_announce(f"Правило по облигациям: {why} {txt}")
+
+
+@app.get("/nsd_status")
+def nsd_status():
+    """Здоровье опроса НРД: последний успешный проход, ошибки, перезапуски вкладки."""
+    try:
+        import nox_nsd
+        st = dict(nox_nsd.STATUS)
+    except Exception as e:
+        return {"ok": False, "text": repr(e)}
+    now = time.time()
+    st["ago_s"] = int(now - st["last_ok"]) if st.get("last_ok") else None
+    st["alive"] = nox_nsd.tab_alive()
+    st["ok"] = bool(st.get("last_ok")) and now - st["last_ok"] < 15 * 60
+    return st
+
+# ------------------------------------------------------------------ копирование сделок трейдера (nox_copytrade)
+def _copy_after(sig, rec):
+    """После решения по сигналу: журнал заявок и голос (в своём потоке — канал копирования не ждёт)."""
+    name = _tk_name(sig.get("ticker") or "")
+    verb = sig.get("verb", "")
+    if rec.get("side"):
+        _journal(said=f"копирование {sig.get('trader')}: {sig.get('title', '')[:120]}",
+                 plan={"ticker": sig.get("ticker"), "side": rec["side"], "lots": rec.get("qty") or 1, "venue": "api-copy"},
+                 exec=True, sent=bool(rec.get("sent")), reason=rec.get("why") or "",
+                 note=f"{rec.get('status', '')} цена {rec.get('price')} его {rec.get('his_price')} "
+                      f"за {rec.get('total_ms')} мс".strip())
+    if rec.get("sent"):
+        import nox_copytrade
+        done = nox_copytrade.say_action(rec.get("action") or ("buy" if rec["side"] == "buy" else "sell"), rec.get("qty") or 1)
+        say = f"{sig.get('trader')} {verb} {name}. {done[:1].upper() + done[1:]}."
+    elif rec.get("dry"):
+        say = f"{sig.get('trader')} {verb} {name}. Заявку не отправил: {rec.get('why')}."
+    else:
+        say = f"{sig.get('trader')} {verb} {name}. {rec.get('why') or 'Пропуск'}."
+    if not _focus.get("active"):
+        threading.Thread(target=_ipc_announce, args=(say,), daemon=True).start()
+
+def _copy_loop():
+    _ready.wait(120)
+    try:
+        import nox_copytrade
+    except Exception:
+        return
+    log = (lambda m: nox_scenarios._log(m)) if nox_scenarios else print
+    nox_copytrade.run({"log": log, "exec_settings": _exec_settings, "after": _copy_after,
+                       "feat": _copy_on})
+
+def _copy_on():
+    """Тумблер «Повтор сделок ProfitKing» во «Фичах»: включено ТОЛЬКО при явном true (нет ключа/ошибка — выключено,
+    в отличие от остальных фич: тут реальные заявки)."""
+    try:
+        return bool(nox_features) and nox_features._load().get("copytrade") is True
+    except Exception:
+        return False
+
+@app.get("/copy_get")
+def copy_get():
+    """Копирование сделок: настройки, счёт, позиции от копирования, последние сигналы, состояние канала."""
+    import nox_copytrade as ct
+    return {**ct.status(), "exec": _exec_settings()}
+
+@app.get("/copy_save")
+def copy_save(enabled: int = -1, trader: str = "", buy: int = -1, close: int = -1, fresh_min: int = 0,
+              account_suffix: str = "", lots: int = 0, short: int = -1):
+    import nox_copytrade as ct
+    d = {}
+    if lots > 0: d["lots"] = lots
+    if short >= 0: d["short"] = bool(short)
+    if enabled >= 0: d["enabled"] = bool(enabled)
+    if buy >= 0: d["buy"] = bool(buy)
+    if close >= 0: d["close"] = bool(close)
+    if trader.strip(): d["trader"] = trader.strip()
+    if fresh_min > 0: d["fresh_min"] = fresh_min
+    if account_suffix.strip(): d["account_suffix"] = account_suffix.strip()[-4:]
+    return {"ok": True, "cfg": ct.save_cfg(d)}
+
+@app.get("/copy_pos")
+def copy_pos(ticker: str, lots: int = 0):
+    """Поправить позицию от копирования вручную (0 — забыть: «закрыл» её больше не продаст)."""
+    import nox_copytrade as ct
+    st = ct.load_state()
+    tk = ticker.upper().strip()
+    if lots > 0:
+        st["positions"][tk] = 1
+    else:
+        st["positions"].pop(tk, None)
+    ct.save_state(st)
+    return {"ok": True, "positions": st["positions"]}
+
+@app.get("/copy_dry")
+def copy_dry(ticker: str = "GAZP", verb: str = "купил"):
+    """Проверка без сделки: счёт, инструмент, цена и лимиты — всё, что перед заявкой. Заявка НЕ отправляется."""
+    import nox_copytrade as ct
+    try:
+        return ct.call(ct.dry_plan(ticker, verb, _exec_settings), timeout=20)
+    except Exception as e:
+        return {"ok": False, "text": f"{type(e).__name__}: {e}"}
+
+def _nsd_loop():
+    """НРД (nsddata.ru) — бережный опрос своим подключением к браузеру Нокса (nox_nsd.run)."""
+    _ready.wait(120)
+    try:
+        import nox_nsd
+    except Exception:
+        return
+    log = (lambda m: nox_scenarios._log(m)) if nox_scenarios else print
+    nox_nsd.run(_nsd_event, enabled=lambda: _feat("nsd"), quiet=lambda: bool(_focus.get("active")), log=log)
 
 def _cscalp_arm_loop():
     """Стаканы CScalp из включённых наблюдателей — держать сверенными (nox_cscalp сверяет их в простое)."""
     while True:
         try:
             if nox_cscalp and nox_watchers and not _feat("cscalp"):
-                nox_cscalp.arm(set())        # «Фичи»: CScalp выключен — не сверять стаканы
+                nox_cscalp.arm(set(), watch=False)   # «Фичи»: CScalp выключен — не сверять стаканы и окна
             elif nox_cscalp and nox_watchers:
                 nox_cscalp.arm({o["ticker"] for w in nox_watchers.load()["watchers"] if w.get("enabled", True)
                                 for b in w.get("branches") or [] for o in b.get("orders") or []
@@ -2250,11 +3867,14 @@ def _cur_engine():
     except Exception: return "silero"
 
 _XTTS_FLAG = r"C:\jarvis-voice\xtts_ready.flag"   # создаётся после успешного селф-теста XTTS
+_F5_CKPT = r"C:\jarvis-voice\models\ru\F5TTS_v1_Base_v2\model_last_inference.safetensors"
 @app.get("/voice_list")
 def voice_list():
     opts = [{"engine": "silero", "speaker": s, "label": f"Silero — {s}"} for s in _SILERO_SPK]
     if os.path.exists(_XTTS_FLAG):   # XTTS показываем только когда он реально работает
         opts.append({"engine": "xtts", "speaker": "", "label": "XTTS — голос Джарвиса"})
+    if os.path.exists(_F5_CKPT):     # F5 (видеокарта NVIDIA) — когда модель на месте
+        opts.append({"engine": "f5", "speaker": "", "label": "F5 — голос Джарвиса"})
     return {"options": opts}
 
 @app.get("/voice_get")

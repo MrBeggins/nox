@@ -81,6 +81,13 @@ def _normalize(text):
     t = _INT.sub(lambda m: _n2w(m.group(0)), t)
     return t
 
+def _volume():
+    try:
+        import nox_volume
+        return nox_volume.get()
+    except Exception:
+        return 1.0
+
 def _load_user_speed():
     try:
         v = float(open(_SPEED_FILE, encoding="utf-8").read().strip())
@@ -127,7 +134,7 @@ def synth(text: str, speed: float = 1.0) -> bytes:
                                      sample_rate=SAMPLE_RATE, put_accent=True, put_yo=True)
     wav = audio.numpy().astype(np.float32)
     peak = float(np.max(np.abs(wav))) or 1.0
-    wav = wav / peak * 0.95
+    wav = wav / peak * 0.95 * _volume()          # громкость — ползунок в окне (tts_volume.txt)
     # тишина по краям: проигрыватель не «съедает» первый звук и последний слог («добрый вечер, с…»)
     wav = np.concatenate([np.zeros(int(SAMPLE_RATE * 0.05), np.float32), wav,
                           np.zeros(int(SAMPLE_RATE * 0.30), np.float32)])
@@ -198,6 +205,15 @@ def set_pitch(v: int = 0):
 @app.get("/speed")
 def get_speed():
     return {"value": _user_speed or 0.0}
+
+@app.get("/volume")
+def get_volume():
+    return {"value": _volume()}
+
+@app.get("/set_volume")
+def set_volume(v: float = 1.0):
+    import nox_volume
+    return {"value": nox_volume.set(v)}
 
 @app.get("/set_speed")
 def set_speed(v: float = 0.0):

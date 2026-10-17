@@ -1,0 +1,35 @@
+# Зависимости Python-служб Nox (профиль по умолчанию: голос Silero на CPU).
+# torch / torchaudio ставятся отдельно из https://download.pytorch.org/whl/cpu (см. setup-nox.ps1).
+# Версии — те, на которых Nox работает у автора (Python 3.11, Windows 11).
+
+# веб-службы (ридеры, заметки, монитор, голос)
+fastapi==0.141.1
+uvicorn==0.53.0
+pydantic==2.13.5
+truststore==0.10.4
+
+# чтение Т-Терминала через окно Яндекс.Браузера (CDP) и календари
+playwright==1.63.0
+
+# голос Silero и русская речь (числа, падежи, ударения)
+numpy==2.4.6
+soundfile==0.14.0
+num2words==0.5.14
+pymorphy3==2.0.6
+pymorphy3-dicts-ru==2.4.417150.4580142
+ruaccent==1.5.8.3
+onnxruntime==1.30.0
+transformers==5.17.0
+huggingface_hub==1.31.0
+sentencepiece==0.2.2
+python-crfsuite==0.9.12
+razdel==0.5.0
+
+# монитор ПК, сторож служб, стаканы CScalp (UI Automation)
+psutil==7.2.2
+comtypes==1.4.17
+
+# НРД и копирование сделок (CDP по websocket), T-Invest с закреплённым сертификатом, зрение (снимок экрана)
+websockets==17.1
+cryptography==50.0.1
+pillow==12.3.0

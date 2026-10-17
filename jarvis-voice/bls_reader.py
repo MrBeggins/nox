@@ -191,14 +191,14 @@ def _api_poll():
     """Один POST на все ряды (экономим дневной лимит). Возвращает dict series->points."""
     global _DATA, _DATA_TS
     y = now_msk().year
-    payload = {"seriesid": ALL_SERIES, "startyear": str(y - 1), "endyear": str(y)}
+    payload = {"seriesid": ALL_SERIES, "startyear": str(y - 1), "endyear": str(y), "calculations": True}
     k = _key()
     if k:
         payload["registrationkey"] = k
     req = urllib.request.Request(
         API_URL, data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": "Nox/1.0"})
-    with urllib.request.urlopen(req, timeout=25) as r:
+    with urllib.request.urlopen(req, timeout=8 if _phase() == "fast" else 25) as r:   # на релизе API висит — не ждать 25 с
         j = json.loads(r.read().decode("utf-8"))
     if j.get("status") != "REQUEST_SUCCEEDED":
         raise RuntimeError("; ".join(j.get("message", [])) or "BLS API error")
@@ -208,8 +208,10 @@ def _api_poll():
         for p in ser.get("data", []):
             if p.get("period", "").startswith("M") and p.get("value") not in (None, ""):
                 try:
+                    pc = ((p.get("calculations") or {}).get("pct_changes") or {}).get("1")
                     pts.append({"year": int(p["year"]), "period": p["period"],
-                                "pname": p.get("periodName", ""), "value": float(p["value"])})
+                                "pname": p.get("periodName", ""), "value": float(p["value"]),
+                                "pct1": float(pc) if pc not in (None, "", "-") else None})
                 except Exception:
                     pass
         pts.sort(key=lambda x: (x["year"], x["period"]), reverse=True)
@@ -340,6 +342,32 @@ def _feed_scenarios(ind, text):
     except Exception:
         pass
 
+# ------------------------------------------------------------------ подача числа наблюдателям (ридер :8126)
+def _core_cpi_mom():
+    """Базовый ИПЦ м/м, % — официальный (BLS pct_changes «1», округлён до 0,1 как в релизе)."""
+    p = _series("CUSR0000SA0L1E")
+    if p and p[0].get("pct1") is not None:
+        return p[0]["pct1"]
+    v = _mom("CUSR0000SA0L1E")
+    if v is None:
+        return None
+    from decimal import Decimal, ROUND_HALF_UP
+    return float(Decimal(str(v)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+def _feed_watchers(ind):
+    if ind != "cpi":
+        return
+    v = _core_cpi_mom()
+    if v is None:
+        return
+    text = f"BLS: базовый ИПЦ США м/м за {_month_ru('CUSR0000SA0L1E')}: {v:+.1f}%"
+    try:
+        import urllib.parse as _up
+        q = _up.urlencode({"text": text, "value": v, "source": "BLS API"})
+        urllib.request.urlopen("http://127.0.0.1:8126/watch_inject?" + q, timeout=60).read()
+    except Exception:
+        pass
+
 # ------------------------------------------------------------------ детект факта
 def _check_facts(announce=True):
     """Сравнивает последний период каждого показателя с запомненным. Новое -> озвучивает."""
@@ -355,6 +383,7 @@ def _check_facts(announce=True):
         text = _TEXT[ind]()
         fired.append((ind, text))
         if announce:
+            _feed_watchers(ind)             # сначала сделки (наблюдатели), потом голос
             _announce("Вышли данные. " + text)
             _feed_scenarios(ind, text)
     if fired:

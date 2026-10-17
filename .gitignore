@@ -76,3 +76,19 @@ jarvis-voice/xtts_ready.flag
 # Бэкапы правок
 **/*.bak
 **/*.bak_*
+
+# Личные данные новых функций (17.10): «Память», стрелки, копирование сделок,
+# закреплённый сертификат T-Invest, отчёты тестов, лаборатория голоса
+jarvis-voice/nox_memory.json
+jarvis-voice/nox_memory_prompt.txt
+jarvis-voice/nox_arrows.json
+jarvis-voice/nox_copytrade.json
+jarvis-voice/copy_state.json
+jarvis-voice/tinvest_pin.json
+jarvis-voice/voice_tests/*report*
+jarvis-voice/voice_lab/
+jarvis-lab/target-dist/
+# сборка раздачи (готовый установщик выкладывается в GitHub Releases, не в git)
+release/payload/
+release/dist/
+release/source/

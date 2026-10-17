@@ -194,7 +194,8 @@ def scan(max_age=20.0):
         if _layout["data"] is None and max_age > 0:
             try:  # сохранённая раскладка прошлого скана (новый процесс не ждёт 4 с)
                 with open(SCAN_OUT, encoding="utf-8-sig") as f:
-                    _layout.update(t=os.path.getmtime(SCAN_OUT), data=_prep(json.load(f)))
+                    # положения окон на момент того скана неизвестны — фоновая сверка пересканирует при простое
+                    _layout.update(t=os.path.getmtime(SCAN_OUT), data=_prep(json.load(f)), rects=None)
             except (OSError, ValueError):
                 pass
         if _layout["data"] is not None and time.time() - _layout["t"] < max_age:
@@ -211,7 +212,41 @@ def scan(max_age=20.0):
         except Exception as e:
             data = {"ok": False, "error": f"скан не удался: {e}", "doms": [], "hidden": []}
         _layout.update(t=time.time(), data=_prep(data))
+        _layout["rects"] = _win_rects({int(d["hwnd"]) for d in data.get("doms") or [] if d.get("hwnd")})
         return data
+
+
+def _win_rects(hwnds):
+    """{окно: (лево, верх, право, низ) | None — окна нет}. Дёшево: без UI Automation."""
+    out = {}
+    for h in hwnds:
+        r = wt.RECT()
+        out[h] = (r.left, r.top, r.right, r.bottom) if user32.IsWindow(h) and user32.GetWindowRect(h, ctypes.byref(r)) else None
+    return out
+
+
+_bg = {"check": 0.0, "scan": 0.0}
+
+
+def _bg_refresh():
+    """Простой рабочего потока: окна CScalp перенесли/развернули/закрыли — пересканировать заранее, чтобы клик стрелки
+    шёл по свежей раскладке (17.10: устаревшие точки после переноса окна стоили 3–28 с на клике)."""
+    now = time.time()
+    if not _bg.get("on", True) or now - _bg["check"] < 1.0:
+        return
+    _bg["check"] = now
+    if _layout.get("data") is None:
+        scan(float("inf"))           # после старта: подхватить сохранённую раскладку (положения окон — сверим ниже)
+    data = _layout.get("data")
+    if not data or not data.get("doms"):
+        return
+    hw = {int(d["hwnd"]) for d in data["doms"] if d.get("hwnd")}
+    if _layout.get("rects") is not None and _win_rects(hw) == _layout["rects"]:
+        return
+    if now - _bg["scan"] < 5.0:
+        return
+    _bg["scan"] = now
+    scan(0)
 
 
 # Быстрая проверка «какой стакан сейчас под точкой» (UI Automation, ~10–30 мс) — вместо 4-секундного скана
@@ -260,14 +295,17 @@ def norm(t):
     return re.sub(r"\s+", "", str(t or "")).upper()
 
 
-def find(ticker, index=None, max_age=20.0):
-    """Видимый стакан с тикером. index — какой по счёту при дублях (слева направо, сверху вниз)."""
+def find(ticker, index=None, max_age=20.0, hwnd=None):
+    """Видимый стакан с тикером. index — какой по счёту при дублях (слева направо, сверху вниз).
+    hwnd — только в этом окне CScalp (группа стрелки/ветки: все её стаканы — из одного окна)."""
     t = norm(ticker)
     data = scan(max_age)
-    hits = sorted((d for d in data.get("doms") or [] if d["ticker"] == t and d.get("main")),
+    hits = sorted((d for d in data.get("doms") or [] if d["ticker"] == t and d.get("main")
+                   and (hwnd is None or int(d.get("hwnd") or 0) == int(hwnd))),
                   key=lambda d: (d["main"][1] < -500, d["main"][0], d["main"][1]))
-    if not hits and max_age > 0:  # в сохранённой раскладке нет — вдруг стакан только что открыли
-        return find(ticker, index, 0)
+    if not hits and max_age > 0 and time.time() - _layout["t"] > 3:
+        # в сохранённой раскладке нет — вдруг стакан только что открыли (свежую раскладку заново не сканируем)
+        return find(ticker, index, 0, hwnd)
     if not hits:
         hidden = [h for h in data.get("hidden") or [] if norm(h["ticker"]) == t]
         why = "есть на скрытой вкладке — откройте её" if hidden else "не открыт в CScalp"
@@ -452,11 +490,29 @@ def _watch(before, t0, tickers, want_trade, timeout):
 _exec_lock = threading.Lock()
 
 
-def plan(ticker, action, index=None, max_age=20.0):
+def group_window(pairs, max_age=20.0):
+    """Окно CScalp, где видны ВСЕ стаканы группы (с дублями: «MIX ×2» — два MIX). Один и тот же тикер бывает
+    открыт и в главном окне, и во вкладке «нокс» отдельного окна — без этого жался бы самый левый, то есть чужой.
+    Нет такого окна — None (как раньше: самый левый стакан)."""
+    need = {}
+    for t, _a, idx in pairs:
+        need[t] = max(need.get(t, 0), (idx + 1) if idx is not None else 1)
+    have = {}
+    for d in scan(max_age).get("doms") or []:
+        if d.get("main") and d.get("hwnd"):
+            h = have.setdefault(int(d["hwnd"]), {})
+            h[d["ticker"]] = h.get(d["ticker"], 0) + 1
+    for hw, cnt in have.items():
+        if all(cnt.get(t, 0) >= n for t, n in need.items()):
+            return hw
+    return None
+
+
+def plan(ticker, action, index=None, max_age=20.0, hwnd=None):
     """Проверки без нажатий: стакан найден, клавиша известна, окно CScalp доступно."""
     if action not in COMMANDS:
         return {"ok": False, "error": f"неизвестное действие {action}"}
-    d, note = find(ticker, index, max_age)
+    d, note = find(ticker, index, max_age, hwnd)
     if not d:
         return {"ok": False, "ticker": norm(ticker), "error": note}
     cs_cmd = COMMANDS[action]
@@ -481,8 +537,22 @@ def _check_targets(plans):
                 continue
             active = p["hwnd"]
         x, y = p["point"]
-        if _root_at(x, y) != p["hwnd"]:
-            problems.append(f"стакан {p['ticker']} перекрыт другим окном")
+        root = _root_at(x, y)
+        if root != p["hwnd"]:
+            r = wt.RECT()
+            user32.GetWindowRect(p["hwnd"], ctypes.byref(r))
+            if not (r.left <= x < r.right and r.top <= y < r.bottom):
+                # точка вне окна CScalp: окно перенесли/развернули — раскладка устарела (нужен скан, это не перекрытие)
+                problems.append(f"окно CScalp со стаканом {p['ticker']} сдвинулось")
+                continue
+            title = ""
+            try:
+                buf = ctypes.create_unicode_buffer(120)
+                user32.GetWindowTextW(root, buf, 120)
+                title = buf.value
+            except Exception:
+                pass
+            problems.append(f"стакан {p['ticker']} перекрыт окном «{title or 'без названия'}»")
             continue
         under = ticker_at(x, y)
         if under != p["ticker"]:
@@ -522,7 +592,11 @@ def execute_many(tickers, action, go=False, restore=True):
     return execute_orders([(t, action) for t in tickers], go=go, restore=restore)
 
 
-def execute_orders(pairs, go=False, restore=True):
+_last_trace = {"t0": 0.0, "steps": []}     # шаги последнего execute_orders (видно и посреди зависания)
+_warm_hwnds = set()                         # окна CScalp, в которые уже жали в этом запуске
+
+
+def execute_orders(pairs, go=False, restore=True, deadline=None, probe=False, hwnd=None):
     """Заявки [(тикер, действие)] над несколькими стаканами — ветка наблюдателя / сценарий на N стаканов.
 
     Раскладка — из кэша/сохранённого файла (без 4-секундного скана). До первого нажатия проверяются ВСЕ
@@ -531,37 +605,99 @@ def execute_orders(pairs, go=False, restore=True):
     Нажатия идут подряд: [курсор → клавиша] одним пакетом SendInput на каждый стакан.
     """
     t_start = time.perf_counter()
-    pairs = [(norm(t), a) for t, a in pairs]
-    tickers = [t for t, _ in pairs]
-    if len(set(tickers)) != len(tickers):
+    _last_trace.update(t0=t_start, steps=[], at=time.strftime("%H:%M:%S"))
+    mark = lambda n: _last_trace["steps"].append((n, round((time.perf_counter() - t_start) * 1000)))
+    # (тикер, действие[, № стакана с 1]) — один тикер дважды («MIX ×2» на вкладке «нокс»): без № — по порядку слева
+    norm_pairs, seen_n, used = [], {}, set()
+    for p in pairs:
+        t, a = norm(p[0]), p[1]
+        n = p[2] if len(p) > 2 and p[2] else None
+        idx = int(n) - 1 if n else 0
+        while (t, idx) in used:          # тот же тикер ещё раз с тем же № — следующий стакан (его нет — отказ всей группе)
+            idx += 1
+        used.add((t, idx))
+        seen_n[t] = max(seen_n.get(t, 0), idx + 1)
+        norm_pairs.append((t, a, idx))
+    if len({(t, i) for t, _, i in norm_pairs}) != len(norm_pairs):
         return {"ok": False, "error": "один и тот же стакан указан дважды", "results": []}
-    plans = [plan(t, a, None, max_age=float("inf") if go else 20.0) for t, a in pairs]
+    pairs = [(t, a) for t, a, _ in norm_pairs]
+    tickers = sorted(set(t for t, _ in pairs))
+    age = float("inf") if go else 20.0
+    dup = any(n > 1 for n in seen_n.values())
+    mark("разбор заявок")
+    # hwnd задан (окно вкладки «нокс») — жмём только в нём, ничего не угадываем
+    hw = int(hwnd) if hwnd else (group_window(norm_pairs, age) if len(norm_pairs) > 1 else None)
+    mark("окно группы")
+    if dup and hw is None:
+        hw = group_window(norm_pairs, 0)        # раскладка могла поменяться — пересканировать
+        if hw is None:
+            # «MIX №2» без общего окна нашёлся бы в ЧУЖОМ окне — не жать ни один
+            return {"ok": False, "error": "нет окна CScalp, где открыты все стаканы группы (" +
+                    ", ".join(f"{t} ×{n}" for t, n in seen_n.items()) + ") — не нажимал ни один", "results": []}
+    plans = [plan(t, a, i if (i or seen_n.get(t, 0) > 1) else None, max_age=age, hwnd=hw) for t, a, i in norm_pairs]
+    mark("планы стаканов")
     bad = [p for p in plans if not p["ok"]]
     if bad or not go:
         return {"ok": not bad, "error": "; ".join(p["error"] for p in bad), "results": plans}
     with _exec_lock:
+        mark("замок исполнения")
         why = _busy_reason()
         if why:
             return {"ok": False, "error": f"не нажимаю: {why}", "results": plans}
         prev_fg, prev_xy = user32.GetForegroundWindow(), _cursor()
         problems = _check_targets(plans)
+        mark("проверка целей" + (f" (проблемы: {'; '.join(problems)})" if problems else ""))
+        if problems and all("перекрыт" in x for x in problems):
+            # стаканы на месте, но поверх — другое окно (всплывашка, браузер): скан не поможет. Секунду дать
+            # окну исчезнуть и проверить ещё раз; нет — отказ с названием мешающего окна
+            time.sleep(0.15)
+            problems = _check_targets(plans)
+            mark("повторная проверка")
+            if problems and all("перекрыт" in x for x in problems):
+                return {"ok": False, "error": "; ".join(sorted(set(problems))) + " — не нажимал ни один",
+                        "results": plans, "steps": list(_last_trace["steps"])}
         if problems:
-            scan(0)  # раскладка поменялась — пересканировать (~4 с) и проверить ещё раз
-            plans = [plan(t, a, None, max_age=0) for t, a in pairs]
+            # стаканы сдвинулись / окно CScalp пересоздано — ОДИН скан (~4 с) и дальше только по свежей раскладке.
+            # 16-17.10: здесь были 7 полных сканов (окно группы + каждый стакан с max_age=0) — 25–30 с ожидания
+            scan(0)
+            mark("пересканирование")
+            if not hwnd:
+                hw = group_window(norm_pairs, float("inf")) if len(norm_pairs) > 1 else None
+            plans = [plan(t, a, i if (i or seen_n.get(t, 0) > 1) else None, max_age=float("inf"), hwnd=hw)
+                     for t, a, i in norm_pairs]
             bad = [p for p in plans if not p["ok"]]
             if bad:
                 return {"ok": False, "error": "; ".join(p["error"] for p in bad) + " — не нажимал ни один", "results": plans}
             problems = _check_targets(plans)
             if problems:
                 return {"ok": False, "error": "; ".join(problems) + " — не нажимал ни один", "results": plans}
+        mark("готов к нажатию")
+        if deadline and time.time() > deadline:
+            # 16.10: окно Нокса держало фокус, пока ждало ответа, — нажатие ушло через 25 с, а отчёт сказал
+            # «ничего не нажато». Опоздавшую рыночную заявку не жмём вовсе
+            return {"ok": False, "error": f"опоздал на {time.time() - deadline + 20:.0f} с от команды — не нажимал ни один",
+                    "results": plans, "steps": list(_last_trace["steps"])}
+        if probe:                               # проба: всё, что перед нажатием, — без клавиш
+            if restore and prev_fg:
+                _activate(prev_fg)
+            return {"ok": True, "probe": True, "results": plans, "steps": list(_last_trace["steps"])}
+        # первое нажатие в это окно CScalp после запуска: 17.10 из 6 стаканов клавишу принял только первый —
+        # окно ещё не было готово к быстрым нажатиям. Один раз дать ему 60 мс
+        cold = [h for h in {p["hwnd"] for p in plans} if h not in _warm_hwnds]
+        if cold:
+            time.sleep(0.06)
+            _warm_hwnds.update(cold)
+            mark("прогрев окна")
         t0 = datetime.datetime.now()
         tp = time.perf_counter()
         active = user32.GetForegroundWindow()
         results = []
-        for p in plans:
+        for k, p in enumerate(plans):
             if p["hwnd"] != active:
                 _activate(p["hwnd"])
                 active = p["hwnd"]
+            if k:
+                time.sleep(0.002)           # 2 мс между стаканами: CScalp успевает понять, какой стакан под курсором
             vk = _VK[p["key"]]
             sent = _send([_mouse_move(*p["point"]), _key(vk), _key(vk, up=True)])
             results.append({**p, "sent": sent, "t_click": time.time(),
@@ -585,6 +721,16 @@ def execute_orders(pairs, go=False, restore=True):
         res = _watch(before, t0, tickers, trade, 2.0 if trade else 1.0)
         for r in results:
             _verdict(r, r["action"], res)
+        # один тикер в нескольких стаканах (MIX ×2): журнал CScalp общий на тикер — считаем, сколько нажатий он
+        # реально принял; лишние «успехи» — неправда (17.10 отчёт сказал «купил MIX, купил MIX» при одном)
+        for t in tickers:
+            same = [r for r in results if r["ticker"] == t]
+            if len(same) < 2 or not trade:
+                continue
+            got = sum(1 for o in res["orders"].get(t) or [] if "ExecuteTradeCommandReq" in o["text"])
+            for k, r in enumerate(same):
+                if k >= got and r.get("ok"):
+                    r.update(ok=False, error=f"{t} №{k + 1}: CScalp не записал нажатие — заявка, скорее всего, не ушла")
         out = {"ok": all(r["ok"] for r in results), "results": results, "prep_ms": round((tp - t_start) * 1000),
                "press_ms": round((t_sent - tp) * 1000, 1), "stray": res["stray"]}
         if res["stray"]:
@@ -646,6 +792,10 @@ def _worker_loop():
                 box["error"] = f"{type(e).__name__}: {e}"
             ev.set()
             continue
+        try:
+            _bg_refresh()
+        except Exception:
+            pass
         if _armed["tickers"] and time.time() - _verify["last_check"] > VERIFY_EVERY:
             try:
                 _verify_armed()
@@ -664,17 +814,48 @@ def submit(fn, timeout=30.0):
     """Выполнить fn в рабочем потоке CScalp. Возвращает (результат, ошибка)."""
     _ensure_worker()
     box, ev = {}, threading.Event()
+    t_put = time.time()
     _tasks.put((fn, box, ev))
-    if not ev.wait(timeout):
-        return None, "CScalp не ответил вовремя"
+    # самописец: задание идёт дольше 3 с — записать, где стоит рабочий поток (на 3, 8, 15 с)
+    snaps, marks = [], [3, 8, 15]
+    while not ev.wait(0.5):
+        el = time.time() - t_put
+        if marks and el >= marks[0]:
+            marks.pop(0)
+            try:
+                import sys, traceback
+                th = _worker.get("thread")
+                fr = sys._current_frames().get(th.ident) if th else None
+                snaps.append({"t": round(el, 1), "queue": _tasks.qsize(),
+                              "stack": [s.strip().replace("\n", " | ")[:260] for s in traceback.format_stack(fr)[-8:]] if fr else []})
+                _last_trace["stall"] = snaps
+            except Exception:
+                pass
+        if el >= timeout:
+            _last_trace["stall"] = snaps
+            _log_stall(snaps)
+            return None, "CScalp не ответил вовремя"
+    if snaps:
+        _log_stall(snaps)
     return box.get("result"), box.get("error")
 
 
-def arm(tickers):
+def _log_stall(snaps):
+    """Записать зависание рабочего потока CScalp в cscalp_stall.log (для разбора)."""
+    try:
+        with open(os.path.join(HERE, "cscalp_stall.log"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": time.strftime("%Y-%m-%d %H:%M:%S"), "steps": _last_trace.get("steps"),
+                                "snaps": snaps}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def arm(tickers, watch=True):
     """Какие стаканы держать сверенными (из включённых наблюдателей). Запускает рабочий поток."""
     _armed["tickers"] = {norm(t) for t in tickers if t}
-    if _armed["tickers"]:
-        _ensure_worker()
+    _bg["on"] = bool(watch)
+    if watch or _armed["tickers"]:
+        _ensure_worker()      # в простое поток следит за положением окон CScalp (стрелки — без задержки)
 
 
 def _verify_armed():
@@ -703,6 +884,116 @@ def _verify_armed():
         _verify["last_scan"] = time.time()
         scan(0)
     _verify["status"] = status
+
+
+# ── Вкладки CScalp: стрелки оверлея привязаны к вкладке («нокс»), а не к списку тикеров ──────────────
+UI_DIR = os.path.join(CS_DIR, "Data", "UserInterface")
+_tabs_cache = {"mt": None, "map": {}}
+
+
+def cs_tabs():
+    """{имя вкладки: [файлы раскладки DL.*.dat]} из MarketViewLayout.srz (имена могут повторяться)."""
+    p = os.path.join(UI_DIR, "MarketViewLayout.srz")
+    try:
+        mt = os.path.getmtime(p)
+    except OSError:
+        return {}
+    if mt == _tabs_cache["mt"]:
+        return _tabs_cache["map"]
+    b = open(p, "rb").read()
+    out = {}
+    for m in re.finditer(rb"DL\.(-?\d+)\.dat", b):
+        tid = m.group(1)
+        i = b.rfind(tid, 0, m.start())               # id вкладки стоит перед её именем
+        if i < 0:
+            continue
+        parts = [x.strip() for x in re.split(r"[\x00-\x1f]+", b[i + len(tid):m.start()].decode("utf-8", "ignore")) if x.strip()]
+        name = max(parts, key=len) if parts else ""
+        name = re.sub(r"^[^\wА-Яа-яЁё(]+|[^\wА-Яа-яЁё)]+$", "", name)
+        if name:
+            out.setdefault(name, []).append("DL." + tid.decode() + ".dat")
+    _tabs_cache.update(mt=mt, map=out)
+    return out
+
+
+def tab_stacks(name):
+    """Стаканы вкладки слева направо по её файлу раскладки (CScalp сам обновляет его при изменениях): ['MIX-12.26',
+    'NVTK', …]. Графики («ROSN, 1h») и пустые («Выбрать инструмент») — мимо. -> (список | None, причина)."""
+    files = cs_tabs().get(name)
+    if not files:
+        return None, f"в CScalp нет вкладки «{name}»"
+    if len(files) > 1:
+        return None, f"вкладок «{name}» в CScalp несколько ({len(files)}) — дайте ей уникальное имя"
+    try:
+        x = open(os.path.join(UI_DIR, files[0]), encoding="utf-8", errors="ignore").read()
+    except OSError as e:
+        return None, f"не читается раскладка вкладки «{name}»: {e}"
+    st = [norm(t) for t in re.findall(r'<LayoutDocument\s+Title="([^"]+)"', x) if "," not in t]
+    return [t for t in st if t and t != "ВЫБРАТЬИНСТРУМЕНТ"], ""
+
+
+def tab_window(name, max_age=float("inf")):
+    """Окно CScalp, где вкладка открыта СЕЙЧАС: в нём видны ровно её стаканы. -> (окно | None, стаканы, причина)."""
+    from collections import Counter
+    st, why = tab_stacks(name)
+    if st is None:
+        return None, [], why
+    if not st:
+        return None, [], f"на вкладке «{name}» нет стаканов"
+    want = Counter(st)
+    for attempt in (0, 1):
+        data = scan(max_age if attempt == 0 else 0)
+        wins = {}
+        for d in data.get("doms") or []:
+            t = d.get("ticker") or ""
+            if d.get("main") and d.get("hwnd") and "," not in t and t != "ВЫБРАТЬИНСТРУМЕНТ":
+                wins.setdefault(int(d["hwnd"]), Counter())[t] += 1
+        for hw, cnt in wins.items():
+            if cnt == want:
+                return hw, st, ""
+        if attempt == 0 and time.time() - _layout["t"] <= 3:
+            break                                    # раскладка свежая — второй скан ничего не даст
+    return None, st, f"вкладка «{name}» не открыта в CScalp"
+
+
+def execute_tab(name, action, go=False, restore=True, deadline=None, probe=False):
+    """Нажать action во ВСЕХ стаканах вкладки, какие на ней есть сейчас, и только в окне, где она открыта.
+    Вкладка закрыта/не видна целиком — не жать ни один."""
+    hw, st, why = tab_window(name, float("inf"))
+    if not hw:
+        return {"ok": False, "error": why + " — не нажимал ни один", "results": [], "tab": name, "stacks": st}
+    seen, pairs = {}, []
+    for t in st:
+        seen[t] = seen.get(t, 0) + 1
+        pairs.append((t, action, seen[t]))
+    r = execute_orders(pairs, go=go, restore=restore, deadline=deadline, probe=probe, hwnd=hw)
+    r.update(tab=name, stacks=st)
+    return r
+
+
+_acc_cache = {"mt": None, "path": None, "acc": {}}
+
+
+def accounts():
+    """Счета CScalp и подключены ли сейчас: {'00550': True, …}. По журналу диспетчера за сегодня: счёт подключён,
+    если хоть один его канал (MCXD, P2ED, MXCR…) последним событием подключился."""
+    d = _today_dir()
+    p = os.path.join(d, "Dispatcher_XDSD.html") if d else None
+    try:
+        mt = os.path.getmtime(p)
+    except (OSError, TypeError):
+        return {}
+    if (p, mt) == (_acc_cache["path"], _acc_cache["mt"]):
+        return _acc_cache["acc"]
+    txt = open(p, encoding="utf-8", errors="ignore").read()
+    last = {}
+    for m in re.finditer(r"Slot \((\w+)\): (Connect|Disconnect): Start \((\d+)\)", txt):
+        last[(m.group(3), m.group(1))] = m.group(2) == "Connect"
+    acc = {}
+    for (a, _slot), on in last.items():
+        acc[a] = acc.get(a, False) or on
+    _acc_cache.update(path=p, mt=mt, acc=acc)
+    return acc
 
 
 def visible():

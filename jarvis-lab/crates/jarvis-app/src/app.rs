@@ -234,6 +234,12 @@ fn handle_phrase(raw: &str, first_recognition: &mut bool, rt: &tokio::runtime::R
         return PhraseOutcome::Ignore;
     }
     info!("Recognized voice: {}", voice);
+    // словарь ошибок распознавания (nox_speech_fix.json): «пять плотов пикапа» -> «пять лотов пика»
+    let fixed = jarvis_core::speechfix::apply(&voice);
+    if fixed != voice {
+        info!("Speech fix: '{}' -> '{}'", voice, fixed);
+        voice = fixed;
+    }
     ipc::send(IpcEvent::SpeechRecognized { text: voice.clone() });
 
     let lang = i18n::get_language();
@@ -327,6 +333,8 @@ fn recognize_command(
                 if let Some(seg) = stt::recognize(frame_buffer, false) {
                     append_text(&mut pending, &seg); // кусок фразы — копим, не исполняем сразу
                     last_activity = SystemTime::now();
+                } else if stt::speech_heard() {
+                    last_activity = SystemTime::now(); // говорит без пауз — кусок ещё не готов, но слова идут
                 }
                 if processed.is_voice {
                     silence_frames = 0;

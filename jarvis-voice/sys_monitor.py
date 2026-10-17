@@ -187,17 +187,28 @@ def _open(q):
             return {"ok": True, "text": f"Открываю {low}, сэр."}
         except Exception as e:
             return {"ok": False, "text": f"Не смог открыть {low}: {type(e).__name__}"}
-    # 5) похоже на домен/URL?
+    # 5) установленная программа: меню «Пуск» + ярлыки рабочего стола, русское название ↔ латиница
+    #    («калибр» → Caliber, «макс» → MAX); свои названия — nox_apps.json
+    try:
+        import nox_apps
+        r = nox_apps.open_app(low)
+        if r.get("ok") or r.get("app"):
+            print(f"[open] «{low}» → {r.get('app')} ({r.get('score')}) {r.get('id', '')}")
+            return r
+    except Exception as e:
+        print("[open] поиск программ:", e)
+    # 6) похоже на домен/URL?
     if "." in low and " " not in low:
         url = s if low.startswith("http") else "https://" + s
         webbrowser.open(url); return {"ok": True, "text": f"Открываю {s}, сэр."}
-    # 6) попытка как программа, иначе — поиск в Google
-    try:
-        subprocess.Popen(s, creationflags=CNW, shell=True)
+    # 7) имя исполняемого файла из PATH; иначе честно «не нашёл» (раньше cmd молча падал, а Нокс говорил «Запускаю»)
+    exe = shutil.which(s)
+    if exe:
+        subprocess.Popen([exe], creationflags=CNW)
         return {"ok": True, "text": f"Запускаю {s}, сэр."}
-    except Exception:
-        webbrowser.open("https://www.google.com/search?q=" + urllib.parse.quote(s))
-        return {"ok": True, "text": f"Не нашёл программу, ищу «{s}» в Google, сэр."}
+    print(f"[open] «{low}» — не нашёл программу")
+    return {"ok": False, "text": f"Не нашёл программу «{s}» на компьютере, сэр. Если нужно поискать в интернете, "
+                                 f"скажите «найди {s}»."}
 
 # ------------------------------------------------------------------ HTTP
 @app.on_event("startup")

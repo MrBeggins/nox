@@ -69,10 +69,13 @@ def parse_when(text):
     elif "через час" in low:
         due = base + dt.timedelta(hours=1); used = "через час"
     else:
-        # [завтра] в HH[:MM]
-        m = re.search(r"(завтра\s+)?в\s+(\d{1,2})(?:[:.](\d{2}))?\b", low)
-        if m:
-            hh = int(m.group(2)); mm = int(m.group(3) or 0)
+        # [завтра] в HH[:MM]. Голос приходит цифрами через пробел (числа словами переводит ядро):
+        # «в пятнадцать тридцать» -> «в 15 30», «в девять ноль пять» -> «в 9 0 5», «в пятнадцать ноль ноль» -> «в 15 0 0»
+        m = re.search(r"(завтра\s+)?в\s+(\d{1,2})(?:[:.](\d{2})|\s+0\s+(\d)(?!\d)|\s+0\s+0(?!\d)|\s+(\d{2})(?!\d))?(?:\s+(?:час\w*|минут\w*))?", low)
+        if m and int(m.group(2)) <= 23:
+            hh = int(m.group(2)); mm = int(m.group(3) or m.group(4) or m.group(5) or 0)
+            if mm > 59:
+                mm = 0
             d = base.replace(hour=hh, minute=mm, second=0, microsecond=0)
             if m.group(1): d += dt.timedelta(days=1)
             elif d <= base: d += dt.timedelta(days=1)   # время уже прошло -> завтра

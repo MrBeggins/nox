@@ -17,7 +17,27 @@ const BEA_URL: &str = "http://127.0.0.1:8129"; // BEA: ВВП и PCE США
 const SYS_URL: &str = "http://127.0.0.1:8132"; // монитор нагрузки + открытие программ/сайтов/поиск
 const NOTES_URL: &str = "http://127.0.0.1:8133"; // заметки и напоминания
 
+/// Голосовые регрессионные проверки (`cargo test -p jarvis-core --lib voice_cases`): в тестовой сборке
+/// сетевые вызовы не уходят, а записываются строкой «<адрес службы> <путь>?k=v&…» — тест сверяет,
+/// куда и с какими параметрами ушла бы фраза. Ничего не исполняется. Кейсы: C:\jarvis-voice\voice_tests\rust_cases.json
+#[cfg(test)]
+pub(crate) mod test_hook {
+    use std::cell::RefCell;
+    thread_local! {
+        pub static CALLS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        pub static INSTRUMENTS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    }
+    pub fn record(svc: &str, path: &str, q: &[(&str, &str)]) -> String {
+        let qs: Vec<String> = q.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+        CALLS.with(|c| c.borrow_mut().push(format!("{} {}?{}", svc, path, qs.join("&"))));
+        String::new()
+    }
+}
+
 fn enabled() -> bool {
+    #[cfg(test)]
+    { return true; }
+    #[allow(unreachable_code)]
     crate::DB
         .get()
         .and_then(|db| db.read().get("tterminal_enabled"))
@@ -36,6 +56,18 @@ fn after_any(t: &str, keys: &[&str]) -> String {
                 })
                 .trim()
                 .to_string();
+        }
+    }
+    String::new()
+}
+
+/// Текст после ключевого слова КАК ЕСТЬ — для заметок, напоминаний и календаря. after_any срезает
+/// гласные в начале (нужно для «стакана газпрома» -> «газпрома»), а в тексте заметки это портило
+/// первое слово: «запиши в календарь отчёт сбера» -> «тчёт сбера».
+fn after_any_raw(t: &str, keys: &[&str]) -> String {
+    for k in keys {
+        if let Some(idx) = t.find(k) {
+            return t[idx + k.len()..].trim().trim_start_matches(|c: char| c == ':' || c == ',').trim().to_string();
         }
     }
     String::new()
@@ -80,11 +112,14 @@ fn extract_instrument(t: &str) -> String {
         // структура/шум
         "заявку", "заявка", "заявки", "ордер", "на", "по", "в", "и",
         "позицию", "позиции", "позиция", "позу", "сделку", "сделки", "сделка",
-        "лот", "лота", "лотов", "акций", "акции", "акцию", "акция",
+        "лот", "лота", "лотов", "лотами", "плотов", "плота", "плот", // «плотов» — так Vosk слышит «лотов»
+        "акций", "акции", "акцию", "акция",
         "штук", "штуки", "штука", "бумаг", "бумаги", "бумагу",
         "тейк", "тейком", "тейкпрофит", "тейк-профит", "профит",
         "стоп", "стопом", "стопа", "стоп-лосс", "лосс",
         "с", "около", "примерно", "цене", "цену", "цена", "по-рыночной", "рыночной",
+        "рынку", "рынок", "рыночную", "маркет", "лимит", "лимитную", "лимитка", "лимиткой", "лимитной",
+        "всей", "всю", "весь", "целиком", "полностью",
         "рублей", "рубль", "рубля", "руб", "рублям",
         "копеек", "копейки", "копейка", "коп",
     ];
@@ -106,6 +141,11 @@ fn parse_order(t: &str, execute: bool) -> Option<String> {
         .iter()
         .find_map(|m| number_after(&words, m))
         .unwrap_or(0.0);
+
+    // Vosk иногда теряет «по»: «пять плотов пика пятьсот сорок пять» — два числа без маркера цены:
+    // первое — объём, последнее — цена.
+    let nums: Vec<f64> = words.iter().filter_map(|w| parse_num(w)).filter(|v| *v != tp).collect();
+    let price = if price == 0.0 && nums.len() >= 2 { *nums.last().unwrap() } else { price };
 
     // количество: первое число (не равное цене/тейку)
     let mut qty = 1i64;
@@ -145,7 +185,8 @@ pub fn try_handle(text: &str) -> Option<String> {
     if !enabled() {
         return None;
     }
-    let t = text.to_lowercase();
+    // Vosk пишет числа словами: «купи пять пик по пятьсот сорок пять» -> «купи 5 пик по 545»
+    let t = crate::numwords::digits(&text.to_lowercase());
 
     // Явная команда ИСПОЛНИТЬ -> заполнить виджет и нажать Купить/Продать.
     // Проверяем ДО «закрытия» и подготовки, иначе фразу перехватят ветки, которые только заполняют.
@@ -154,9 +195,12 @@ pub fn try_handle(text: &str) -> Option<String> {
         || t.contains("отправь заявк") || t.contains("исполни заявк") || t.contains("соверши сделк")
         || t.contains("открой сделк") || t.contains("продай всё") || t.contains("продай все")
         || t.contains("сделай сделк");
+    // «на продажу всей позиции», «позицию целиком» — это закрытие (объём и сторона — из портфеля)
+    let whole_pos = t.contains("всей позиц") || t.contains("всю позиц") || t.contains("позицию целиком")
+        || t.contains("позицию полностью");
     if exec_intent {
         // «продай всё X» / «выставь закрытие X» -> закрыть всю позицию (объём и сторона — из портфеля)
-        let close_all = t.contains("продай всё") || t.contains("продай все") || t.contains("закр");
+        let close_all = t.contains("продай всё") || t.contains("продай все") || t.contains("закр") || whole_pos;
         if close_all {
             let q = extract_instrument(&t);
             if q.trim().is_empty() {
@@ -174,8 +218,8 @@ pub fn try_handle(text: &str) -> Option<String> {
     }
 
     // Закрытие позиции -> ГОТОВИМ заявку (объём берём из портфеля), не исполняем
-    if t.contains("закр") && (t.contains("позиц") || t.contains("сделк")
-        || t.contains("закрой ") || t.contains("закрыт"))
+    if whole_pos || (t.contains("закр") && (t.contains("позиц") || t.contains("сделк")
+        || t.contains("закрой ") || t.contains("закрыт")))
     {
         let q = extract_instrument(&t);
         if q.trim().is_empty() {
@@ -247,7 +291,7 @@ pub fn try_handle(text: &str) -> Option<String> {
 
     // Заметки: «запомни …» / «мои заметки»
     if t.starts_with("запомни") || t.contains("запомни что") {
-        let body = after_any(&t, &["запомни что", "запомни"]);
+        let body = after_any_raw(&t, &["запомни что", "запомни"]);
         return Some(fetch_at(NOTES_URL, "/note_add", &[("text", body.trim())], "заметки"));
     }
     if (t.contains("мои заметк") || t.contains("покажи заметк") || t.contains("какие заметк")
@@ -259,13 +303,16 @@ pub fn try_handle(text: &str) -> Option<String> {
         return Some(fetch_at(NOTES_URL, "/reminders", &[], "напоминания"));
     }
     if t.starts_with("напомни") || t.contains("напомни мне") {
-        let body = after_any(&t, &["напомни мне", "напомни"]);
+        let body = after_any_raw(&t, &["напомни мне", "напомни"]);
         return Some(fetch_at(NOTES_URL, "/remind", &[("text", body.trim())], "напоминания"));
     }
 
     // Открытие программ / сайтов / веб-поиск: «открой …», «запусти …», «найди …», «загугли …»
-    if t.starts_with("открой") || t.starts_with("запусти") || t.starts_with("найди")
-        || t.starts_with("загугли") || t.starts_with("поиск ") || t.starts_with("открыть")
+    // «открой стакан газпрома / портфель» — это терминал, а не программа (раньше: «не нашёл программу»)
+    let terminal_word = t.contains("стакан") || t.contains("портфел") || t.contains("позици") || t.contains("заявк");
+    if (t.starts_with("открой") || t.starts_with("запусти") || t.starts_with("найди")
+        || t.starts_with("загугли") || t.starts_with("поиск ") || t.starts_with("открыть"))
+        && !terminal_word
     {
         return Some(fetch_at(SYS_URL, "/open", &[("q", t.as_str())], "система"));
     }
@@ -283,7 +330,7 @@ pub fn try_handle(text: &str) -> Option<String> {
     let is_filter_cmd = t.contains("тикер") || t.contains("фраз") || t.contains("источник")
         || t.contains("следи за новост");
     if agenda_trigger && !is_filter_cmd {
-        let body = after_any(&t, &[
+        let body = after_any_raw(&t, &[
             "добавь событие", "добавь напоминание", "добавь команду", "добавь задачу", "добавь заметку",
             "запиши в календарь", "в календарь", "в календаре",
             "напомни мне", "напомни", "запиши", "запланируй",
@@ -486,7 +533,10 @@ pub fn try_handle(text: &str) -> Option<String> {
 }
 
 /// Записать голосовую заметку в общий агенда-файл (его читает GUI-Календарь).
+#[allow(unreachable_code)]
 fn save_agenda(kind: &str, text: &str) -> String {
+    #[cfg(test)]
+    { return test_hook::record("agenda", kind, &[("text", text)]); }
     use std::time::{SystemTime, UNIX_EPOCH};
     let dir = crate::APP_CONFIG_DIR
         .get()
@@ -521,7 +571,10 @@ fn save_agenda(kind: &str, text: &str) -> String {
 }
 
 #[cfg(feature = "reqwest")]
+#[allow(unreachable_code)]
 fn fetch_cal(path: &str, q: &str, timeout_secs: u64) -> String {
+    #[cfg(test)]
+    { return test_hook::record(CAL_URL, path, &[("q", q)]); }
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .build()
@@ -546,7 +599,10 @@ fn fetch_cal(_path: &str, _q: &str, _timeout_secs: u64) -> String {
 }
 
 #[cfg(feature = "reqwest")]
+#[allow(unreachable_code)]
 fn is_instrument(q: &str) -> bool {
+    #[cfg(test)]
+    { return test_hook::INSTRUMENTS.with(|i| i.borrow().iter().any(|x| x == q)); }
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(6))
         .build()
@@ -571,7 +627,10 @@ fn is_instrument(_q: &str) -> bool {
 }
 
 #[cfg(feature = "reqwest")]
+#[allow(unreachable_code)]
 fn fetch(path: &str, query: &[(&str, &str)]) -> String {
+    #[cfg(test)]
+    { return test_hook::record(READER_URL, path, query); }
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -599,7 +658,10 @@ fn fetch(_path: &str, _query: &[(&str, &str)]) -> String {
 }
 
 #[cfg(feature = "reqwest")]
+#[allow(unreachable_code)]
 fn fetch_mag(path: &str, query: &[(&str, &str)]) -> String {
+    #[cfg(test)]
+    { return test_hook::record(MAG_URL, path, query); }
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -624,7 +686,10 @@ fn fetch_mag(_path: &str, _query: &[(&str, &str)]) -> String {
 }
 
 #[cfg(feature = "reqwest")]
+#[allow(unreachable_code)]
 fn fetch_bls(path: &str, query: &[(&str, &str)]) -> String {
+    #[cfg(test)]
+    { return test_hook::record(BLS_URL, path, query); }
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -672,7 +737,10 @@ pub fn route(_text: &str) -> Option<String> {
 
 /// Универсальный GET к локальному сервису-помощнику (монитор/заметки и т.п.): берём поле "text".
 #[cfg(feature = "reqwest")]
+#[allow(unreachable_code)]
 fn fetch_at(base_url: &str, path: &str, query: &[(&str, &str)], label: &str) -> String {
+    #[cfg(test)]
+    { return test_hook::record(base_url, path, query); }
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
@@ -701,7 +769,10 @@ fn fetch_bls(_path: &str, _query: &[(&str, &str)]) -> String {
 }
 
 #[cfg(feature = "reqwest")]
+#[allow(unreachable_code)]
 fn fetch_bea(path: &str, query: &[(&str, &str)]) -> String {
+    #[cfg(test)]
+    { return test_hook::record(BEA_URL, path, query); }
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -737,7 +808,10 @@ fn us_join(a: String, b: String) -> String {
 }
 
 #[cfg(feature = "reqwest")]
+#[allow(unreachable_code)]
 fn fetch_mind(path: &str, query: &[(&str, &str)]) -> String {
+    #[cfg(test)]
+    { return test_hook::record(MIND_URL, path, query); }
     // 70с > таймаутов ридера (заполнение 40с + нажатие 20с): иначе Нокс скажет «недоступен»,
     // а заявка в это время уйдёт
     let client = match reqwest::blocking::Client::builder()
@@ -761,4 +835,54 @@ fn fetch_mind(path: &str, query: &[(&str, &str)]) -> String {
 #[cfg(not(feature = "reqwest"))]
 fn fetch_mind(_path: &str, _query: &[(&str, &str)]) -> String {
     "Чтение недоступно в этой сборке.".to_string()
+}
+
+/// Голосовые регрессионные проверки: фразы из C:\jarvis-voice\voice_tests\rust_cases.json прогоняются через
+/// настоящий try_handle; сеть подменена test_hook. Кейс: {"say", "expect": [подстроки вызова/ответа],
+/// "not": [чего быть не должно], "instruments": [что считать инструментом для голого названия], "none": true}.
+/// Отчёт — C:\jarvis-voice\voice_tests\rust_report.json (его читает run_tests.py).
+#[cfg(test)]
+mod voice_cases {
+    use super::*;
+
+    fn run(say: &str, instruments: &[String]) -> (Option<String>, Vec<String>) {
+        test_hook::CALLS.with(|c| c.borrow_mut().clear());
+        test_hook::INSTRUMENTS.with(|i| *i.borrow_mut() = instruments.to_vec());
+        let reply = try_handle(say);
+        let calls = test_hook::CALLS.with(|c| c.borrow().clone());
+        (reply, calls)
+    }
+
+    #[test]
+    fn voice_cases() {
+        let path = r"C:\jarvis-voice\voice_tests\rust_cases.json";
+        let data = std::fs::read_to_string(path).expect("нет файла кейсов");
+        let cases: Vec<serde_json::Value> = serde_json::from_str(&data).expect("кейсы — не JSON");
+        let mut report = Vec::new();
+        let mut fails = 0;
+        for c in &cases {
+            let say = c["say"].as_str().unwrap_or("");
+            let inst: Vec<String> = c["instruments"].as_array().map(|a| a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string())).collect()).unwrap_or_default();
+            let (reply, calls) = run(say, &inst);
+            let hay = format!("{} || {}", calls.join(" | "), reply.clone().unwrap_or_default());
+            let mut problems: Vec<String> = Vec::new();
+            for e in c["expect"].as_array().into_iter().flatten().filter_map(|x| x.as_str()) {
+                if !hay.contains(e) { problems.push(format!("нет «{}»", e)); }
+            }
+            for n in c["not"].as_array().into_iter().flatten().filter_map(|x| x.as_str()) {
+                if hay.contains(n) { problems.push(format!("лишнее «{}»", n)); }
+            }
+            if c["none"].as_bool() == Some(true) && (reply.is_some() || !calls.is_empty()) {
+                problems.push("должно уйти дальше (None), а перехвачено".into());
+            }
+            if !problems.is_empty() { fails += 1; }
+            report.push(serde_json::json!({"say": say, "ok": problems.is_empty(), "problems": problems,
+                                           "calls": calls, "reply": reply}));
+        }
+        let _ = std::fs::write(r"C:\jarvis-voice\voice_tests\rust_report.json",
+                               serde_json::to_string_pretty(&report).unwrap_or_default());
+        println!("голосовые кейсы Rust: {} из {} прошли", cases.len() - fails, cases.len());
+        assert_eq!(fails, 0, "провалено кейсов: {} (см. rust_report.json)", fails);
+    }
 }

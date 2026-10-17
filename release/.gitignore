@@ -1,0 +1,4 @@
+# промежуточная сборка и готовый установщик (exe выкладывать в GitHub Releases, не в git)
+payload/
+dist/
+__pycache__/

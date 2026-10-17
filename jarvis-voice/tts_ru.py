@@ -4,7 +4,11 @@ Usage: python tts_ru.py "текст" [out.wav]
 import sys, os, time
 
 # ffmpeg.exe на PATH (нужен transformers-whisper для транскрипции референса)
-os.environ["PATH"] = r"C:\Users\Дамир\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.1-full_build\bin" + os.pathsep + os.environ.get("PATH", "")
+import glob as _glob   # ffmpeg из winget (Gyan.FFmpeg) — в профиле текущего пользователя
+_ff = sorted(_glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Packages",
+                                     "Gyan.FFmpeg*", "ffmpeg-*", "bin")))
+if _ff:
+    os.environ["PATH"] = _ff[-1] + os.pathsep + os.environ.get("PATH", "")
 
 # Обходим torchcodec: torchaudio.load в 2.11 требует ffmpeg 4-7 DLL, но нам нужен
 # только wav-референс -> читаем через soundfile.

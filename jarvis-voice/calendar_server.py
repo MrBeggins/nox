@@ -16,7 +16,7 @@ import uvicorn
 CAL_URL = "https://www.investing.com/economic-calendar/"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
-APP_DB = r"C:\Users\Дамир\AppData\Roaming\com.priler.jarvis\app.db"
+APP_DB = os.path.join(os.environ.get("APPDATA") or os.path.expanduser(r"~\AppData\Roaming"), "com.priler.jarvis", "app.db")
 
 # JS: извлечь все события календаря
 EXTRACT_JS = r"""

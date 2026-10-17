@@ -196,9 +196,12 @@
         { title: "Рынок и новости", items: [
             { key: "news_voice", label: "Чтение новостей вслух", desc: "Озвучка ленты по фильтру со вкладки «Новости» (это тот же переключатель)." },
             { key: "corp_events", label: "Корпсобытия и раскрытия", desc: "Дивиденды, выкуп, допэмиссии, оферты, дефолты и важные повестки ЦРКИ — читаются всегда, независимо от фильтра. Выключено — такие новости идут обычным фильтром." },
+            { key: "smart_dedup", label: "Смысловой фильтр повторов", desc: "Одна и та же новость другими словами («с Москвой и Пекином» = «с Россией и Китаем») не читается второй раз до конца дня. Решает локальный мозг Qwen 7B (Ollama, ~0,15 с, 4,4 ГБ видеопамяти). Новости с другими цифрами всегда читаются. Выключено — повторы ловятся только по словам." },
             { key: "watchers", label: "Наблюдатели", desc: "Сделки по новостям: ветки, слова, решения по ставке ЦБ/ФРС. Выключено — наблюдатели новости не проверяют совсем." },
             { key: "scenarios", label: "Сценарии «стакан по новости»", desc: "Открытие и подсветка стакана по сценариям со страницы «Наблюдатели»." },
             { key: "cscalp", label: "CScalp", desc: "Заявки наблюдателей в CScalp и фоновая сверка стаканов. Выключено — в CScalp ничего не нажимается." },
+            { key: "watch_api", off: true, label: "Заявки наблюдателей через API", desc: "Наблюдатели и стрелки не нажимают кнопку, а берут из своего виджета «Заявка» тип (рыночная или лимитная), цену и объём и отправляют заявку через T-Invest API на счёт, выбранный в терминале (~0,1 с). Объём, тип и цену меняйте прямо в виджете. Лимиты — с вкладки «Т-Терминал». Выключено — нажимают кнопку, как раньше." },
+            { key: "copytrade", off: true, label: "Повтор сделок ProfitKing", desc: "Сигнал из Stocksi «ProfitKing купил X» — лонг 1 лот, «закрыл X» — шорт 1 лот, через T-Invest API на брокерский счёт …5143. Позиции раздаёте сами. Нужен и тумблер исполнения на вкладке «Т-Терминал». Выключено — сигналы не слушаются." },
             { key: "calendar", label: "Календарь событий", desc: "Утренний дайджест в 8:00 и предупреждение «через 3 минуты — …» перед событиями." },
             { key: "us_macro", label: "Статистика США", desc: "Нонфарм, CPI, PPI, JOLTS, ВВП и PCE с официальных сайтов в момент релиза. Выключено — службы останавливаются." },
             { key: "magellan", label: "Магеллан", desc: "Order Flow MOEX (russianmagellan.pro): перекос покупатели/продавцы, крупный игрок, резкое движение цены. Выключено — служба останавливается." },
@@ -207,6 +210,7 @@
             { key: "notes", label: "Заметки и напоминания", desc: "«Запомни…», «напомни в 15:00…». Выключено — служба останавливается." },
             { key: "pc_alerts", label: "Уведомления о загрузке ПК", desc: "«Внимание: процессор загружен на 95 процентов». Команды «открой …» работают и без этого." },
             { key: "ollama", label: "Локальный мозг Ollama", desc: "Запасной бесплатный мозг на этом компьютере. Облачный мозг работает и без него. Выключено — не запускается вместе с Ноксом (уже запущенный не трогаем)." },
+            { key: "vision", label: "Зрение", desc: "«Нокс, что на экране?», «глянь на график», «что тут написано», «что на левом экране». Снимок экрана с курсором (или названного) уходит в облачную модель по ключу APIMIRA только по такой просьбе — фонового наблюдения нет. Ответ ~5–8 с." },
         ]},
         { title: "Голос", items: [
             { key: "greeting", label: "Приветствие при запуске", desc: "«Добрый день» и «Все системы работают в норме» при старте Нокса." },
@@ -218,11 +222,34 @@
         try { features = JSON.parse(await invoke<string>("features_get")) || {} } catch (e) { features = {} }
     }
     // состояние для разметки: «чтение новостей» — тот же переключатель, что на вкладке «Новости»
-    $: fstate = Object.fromEntries(FEATURE_GROUPS.flatMap(g => g.items).map(f =>
-        [f.key, f.key === "news_voice" ? newsMonOn : features[f.key] !== false]))
+    // off: true — по умолчанию ВЫКЛЮЧЕНО (нет ключа — выключено): повтор сделок ставит реальные заявки
+    $: fstate = Object.fromEntries(FEATURE_GROUPS.flatMap(g => g.items).map((f: any) =>
+        [f.key, f.key === "news_voice" ? newsMonOn : f.off ? features[f.key] === true : features[f.key] !== false]))
+    // ---- Повтор сделок ProfitKing: свой объём (не лимиты наблюдателей) ----
+    let copyLots = 1
+    let copyShort = true
+    let copyInfo = ""
+    async function copyLoad() {
+        try {
+            const d = JSON.parse(await invoke<string>("copy_get"))
+            copyLots = d.cfg?.lots ?? 1
+            copyShort = d.cfg?.short !== false
+            copyInfo = d.account?.id ? `Счёт ${d.account.name || ""} ${d.account.id} · ответ API ${d.account.rtt_ms ?? "?"} мс`
+                : (d.status || "")
+        } catch (e) { copyInfo = "ридер не отвечает" }
+    }
+    async function copySave() {
+        copyLots = Math.max(1, Math.min(100, Math.round(Number(copyLots) || 1)))
+        try {
+            const d = JSON.parse(await invoke<string>("copy_save", { lots: copyLots, short: copyShort ? 1 : 0 }))
+            copyLots = d.cfg?.lots ?? copyLots
+            copyShort = d.cfg?.short !== false
+        } catch (e) { console.error(e) }
+    }
+
     async function featToggle(key: string) {
         if (key === "news_voice") { await toggleMon(); return }
-        const on = features[key] === false
+        const on = !fstate[key]
         try {
             await invoke("features_set", { key, on })
             features = { ...features, [key]: on }
@@ -409,7 +436,7 @@
         try {
             const r = JSON.parse(await invoke<string>("voice_test", { engine: o.engine, speaker: o.speaker }))
             ttsMsg = r.text || ""
-            ttsCur = (o.engine === "xtts") ? "XTTS — голос Джарвиса" : "Silero — " + o.speaker
+            ttsCur = o.label
         } catch (e) { ttsMsg = "Не удалось проиграть." }
     }
 
@@ -418,11 +445,13 @@
         loadNews()
         loadMagellan()
         featuresLoad()
+        copyLoad()
         // выбор голоса (движок + диктор)
         try {
             ttsOptions = (JSON.parse(await invoke<string>("voice_list")).options) || []
             const cur = JSON.parse(await invoke<string>("voice_get"))
-            ttsCur = (cur.engine === "xtts") ? "XTTS — голос Джарвиса" : "Silero — " + cur.speaker
+            const curOpt = ttsOptions.find(o => o.engine === cur.engine && (cur.engine !== "silero" || o.speaker === cur.speaker))
+            ttsCur = curOpt ? curOpt.label : "Silero — " + cur.speaker
             ttsSel = cur.engine + "|" + (cur.engine === "silero" ? cur.speaker : "")
         } catch (e) { ttsOptions = [] }
         // load voices
@@ -722,6 +751,19 @@
                             on:change={() => featToggle(f.key)} /> {fstate[f.key] ? "включено" : "выключено"}</label>
                     </div>
                     <p class="nx-desc">{f.desc}</p>
+                    {#if f.key === "copytrade"}
+                        <div class="feat-sub">
+                            <div class="nx-row" style="gap:16px; flex-wrap:wrap">
+                                <label class="nx-fld">Лотов на сделку<input class="nx-num" type="number" min="1" max="100" step="1"
+                                    bind:value={copyLots} on:change={copySave} /></label>
+                                <label class="nx-sw"><input type="checkbox" bind:checked={copyShort} on:change={copySave} />
+                                    {copyShort ? "«закрыл» — шорт" : "«закрыл» — только закрытие"}</label>
+                            </div>
+                            <p class="nx-hint">Свой объём повтора — лимит лотов наблюдателей тут не действует; сумма сделки всё равно
+                                не больше лимита в рублях с вкладки «Т-Терминал». Закрытие — столько, сколько от копирования ещё не роздано.
+                                {copyInfo}</p>
+                        </div>
+                    {/if}
                     {#if f.key === "magellan" && fstate.magellan}
                         <div class="feat-sub">
             <div class="nx-block">

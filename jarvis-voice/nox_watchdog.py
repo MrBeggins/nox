@@ -13,7 +13,11 @@ XTTS_PY  = r"C:\jarvis-voice\.venv-xtts\Scripts\python.exe"   # изолиров
 VOICE_DIR = r"C:\jarvis-voice"
 LAB_DIR  = r"C:\jarvis-lab"
 OLLAMA   = os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Ollama\ollama.exe")
-YANDEX   = r"C:\Program Files\Yandex\YandexBrowser\Application\browser.exe"
+YANDEX   = next((p for p in (
+    r"C:\Program Files\Yandex\YandexBrowser\Application\browser.exe",
+    r"C:\Program Files (x86)\Yandex\YandexBrowser\Application\browser.exe",
+    os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Yandex\YandexBrowser\Application\browser.exe"),
+) if os.path.exists(p)), r"C:\Program Files\Yandex\YandexBrowser\Application\browser.exe")
 CREATE_NO_WINDOW = 0x08000000
 IPC_HOST, IPC_PORT = "127.0.0.1", 9712
 

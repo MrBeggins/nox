@@ -96,8 +96,13 @@ fn enabled() -> bool {
     db_get("brain_enabled").map(|v| v == "true").unwrap_or(true)
 }
 
+/// Память Нокса (правила общения + факты о пользователе, вкладка «Память»): готовый текст пишет nox_memory.py.
+const MEMORY_PROMPT_FILE: &str = r"C:\jarvis-voice\nox_memory_prompt.txt";
+
 fn system_prompt() -> String {
-    std::env::var("JARVIS_BRAIN_SYSTEM").unwrap_or_else(|_| DEFAULT_SYSTEM.to_string())
+    let base = std::env::var("JARVIS_BRAIN_SYSTEM").unwrap_or_else(|_| DEFAULT_SYSTEM.to_string());
+    let memory = std::fs::read_to_string(MEMORY_PROMPT_FILE).unwrap_or_default();
+    base + memory.trim_end()
 }
 
 fn timeout_secs() -> u64 {

@@ -14,6 +14,7 @@
 Использование:  import nox_textnorm;  text = nox_textnorm.normalize(text)
 """
 import re
+import time
 
 try:
     from num2words import num2words as _n2w_raw
@@ -86,10 +87,32 @@ def _decaps(t):
             if p.is_known and "Abbr" not in p.tag and "Init" not in p.tag:
                 return w.lower()
         return w
-    return re.sub(r"(?<![А-Яа-яЁё])[А-ЯЁ]{3,}(?![а-яё])", low, t)
+    letters = [c for c in t if c.isalpha() and "а" <= c.lower() <= "я"]
+    caps = len(letters) >= 12 and sum(c.isupper() for c in letters) / len(letters) > 0.7
+    t = re.sub(r"(?<![А-Яа-яЁё])[А-ЯЁ]{3,}(?![а-яё])", low, t)
+    if caps:
+        # заголовок капсом: «С ИРАНОМ», «НА 2%» — предлоги и союзы тоже строчными; ЦБ, ЕС, РФ — как есть
+        t = re.sub(r"(?<![А-Яа-яЁё])[А-ЯЁ]{1,2}(?![А-Яа-яЁё])", lambda m: m.group(0) if m.group(0) in _ABBR else m.group(0).lower(), t)
+        t = t[:1].upper() + t[1:]
+    return t
 
 
 def _expand_abbr(t):
+    # «ЦБ РФ», «Минфин РФ» -> «… России» (раньше «Центробанк Эр Эф»)
+    t = re.sub(r"(?<![А-Яа-яЁё])(ЦБ|Банк|Минфин|МИД|Минэнерго|Минэкономразвития|Минпромторг|Минтранс|Минцифры|"
+               r"Правительство|Президент|Госдума|Генпрокуратура)\s+РФ(?![А-Яа-яЁё])", r"\1 России", t)
+    # «в РФ», «против РФ», «с РФ» — по падежу предлога; без предлога — «Россия»
+    _rf = {"России": ("в", "во", "о", "об", "при", "из", "для", "у", "от", "до", "против", "кроме", "без", "после",
+                      "вокруг", "к", "ко", "по", "территории", "экономики", "президент", "граждан"),
+           "Россией": ("с", "со", "между", "над", "под", "перед"), "Россию": ("на", "про", "через", "в", "за")}
+    def _rf_case(m):
+        w = m.group(1).lower()
+        for form, preps in _rf.items():
+            if w in preps:
+                return f"{m.group(1)} {form}"
+        return f"{m.group(1)} России"
+    t = re.sub(r"(?<![А-Яа-яЁё])([А-Яа-яЁё]+)\s+РФ(?![А-Яа-яЁё])", _rf_case, t)
+    t = re.sub(r"(?<![А-Яа-яЁё])РФ(?![А-Яа-яЁё])", "Россия", t)
     for rx, rep in _ABBR_RE:
         t = rx.sub(rep, t)
     return t
@@ -214,14 +237,22 @@ def _units(t):
     t = re.sub(r"(?<=\d)\s*[-–—]\s*(?=\d)", " — ", t)             # 480-600 -> «480 — 600» (пауза)
     t = re.sub(r"(?<![\w])\+\s*(?=\d)", "плюс ", t)              # +2,3% -> плюс ...
     t = re.sub(r"(?<![\w\d])[-−–]\s*(?=\d)", "минус ", t)        # -1,5% -> минус ... (диапазон 480-600 не трогаем)
+    def _rub(m):
+        k = (m.group(2) + "0")[:2]
+        if int(m.group(1).replace(" ", "") or 0) == 0:
+            return f"{int(k)} копейка"                    # «0,5 руб.» -> «пятьдесят копеек»
+        return f"{m.group(1)} рубль" + ("" if k == "00" else f" {int(k)} копейка")
+    t = re.sub(r"(?<![\d.,])(\d[\d ]*)[.,](\d{1,2})\s*(?:руб\.?|рубл[а-яё]*|₽)(?![А-Яа-яЁё])", _rub, t)
     t = re.sub(num + r"\s*%", r"\1 процент", t)
     t = re.sub(r"\$\s*" + num, r"\1 доллар", t)                 # $103,91 -> 103,91 доллар
     t = re.sub(r"€\s*" + num, r"\1 евро", t)
     t = re.sub(num + r"\s*\$", r"\1 доллар", t)
     t = re.sub(num + r"\s*₽", r"\1 рубль", t)
     t = re.sub(num + r"\s*€", r"\1 евро", t)
+    t = re.sub(r"(?<!\d)((?:19|20)\d{2})\s*г\.(?=\s+[а-яё])", r"\1 год", t)
+    t = re.sub(r"(?<!\d)((?:19|20)\d{2})\s*г\.?(?![А-Яа-яЁё])", r"\1 год", t)
     abbr = [(r"трлн\.?", "триллион"), (r"млрд\.?", "миллиард"), (r"млн\.?", "миллион"), (r"тыс\.", "тысяча"),
-            (r"руб\.?", "рубль"), (r"коп\.", "копейка"), (r"долл\.", "доллар"), (r"шт\.", "штука"),
+            (r"руб\.?", "рубль"), (r"коп\.", "копейка"), (r"долл\.", "доллар"), (r"шт\.", "штука"), (r"мес\.", "месяц"),
             (r"п\.\s?п\.", "процентный пункт"), (r"б\.\s?п\.", "базисный пункт"), (r"гг\.", "годы"), (r"г\.", "год")]
     for a, b in abbr:
         t = re.sub(r"(\d\s*)" + a + r"(?![А-Яа-яЁё])", r"\1" + b, t)
@@ -245,7 +276,46 @@ _PREP_CASE = {
 _MONTHS = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
            "сентября", "октября", "ноября", "декабря")
 _ACC_PREPS = ("на", "в", "во", "за", "про", "через")
+# «год» после предлога: «в 2026 году», «до 2028 года», «к 2030 году», «за 2027 год»
+_YEAR_PREP = {"в": "loct", "во": "loct", "о": "loct", "об": "loct", "при": "loct",
+              "на": "accs", "за": "accs", "про": "accs", "через": "accs", "по": "accs",
+              "до": "gent", "с": "gent", "со": "gent", "от": "gent", "после": "gent", "около": "gent", "для": "gent",
+              "без": "gent", "из": "gent", "кроме": "gent", "начала": "gent", "конца": "gent", "середины": "gent",
+              "к": "datv", "ко": "datv", "перед": "ablt", "между": "ablt", "над": "ablt", "под": "ablt"}
+_YEAR_FORM = {"nomn": "год", "accs": "год", "gent": "года", "datv": "году", "loct": "году", "ablt": "годом"}
 _NUM_RE = re.compile(r"(?<![\w.,])(\d{1,3}(?: \d{3})+|\d+)(?:[.,](\d+))?(?![\w])")
+
+# даты: «28.09.2026» читалось «двадцать восемь целых девять сотых.2026»
+_DATE = r"(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s*(?:года|г\.?)(?![А-Яа-яЁё]))?"
+_DATE_RANGE_RE = re.compile(r"(?<![\d.])" + _DATE + r"\s*[-–—]\s*" + _DATE + r"(?!\.?\d)")   # точка конца фразы — можно
+_DATE_RE = re.compile(r"(?<![\d.])" + _DATE + r"(?!\.?\d)")
+
+
+def _date_words(d, m, y, with_year):
+    d, m, y = int(d), int(m), int(y)
+    if not (1 <= d <= 31 and 1 <= m <= 12):
+        return None
+    return f"{d} {_MONTHS[m - 1]}" + (f" {y} года" if with_year else "")
+
+
+def _dates(t):
+    """«28.09.2026» -> «28 сентября» (год — только если не текущий), «28.09.2026 - 09.10.2026» ->
+    «с 28 сентября по 9 октября». Числа и падеж («с двадцать восьмого», «по девятое») — дальше в _numbers."""
+    cur = time.localtime().tm_year
+
+    def rng(m):
+        y1, y2 = int(m.group(3)), int(m.group(6))
+        a = _date_words(*m.group(1, 2, 3), with_year=y1 != y2)
+        b = _date_words(*m.group(4, 5, 6), with_year=y1 != y2 or y2 != cur)
+        if not a or not b:
+            return m.group(0)
+        prev = re.search(r"([А-Яа-яЁё]+)\s*$", t[:m.start()])
+        prev = prev.group(1).lower() if prev else ""
+        lead = "" if prev in ("с", "со") else "период с " if prev in ("за", "в", "во", "на") else "с "
+        return f"{lead}{a} по {b}"
+
+    t = _DATE_RANGE_RE.sub(rng, t)
+    return _DATE_RE.sub(lambda m: _date_words(*m.group(1, 2, 3), with_year=int(m.group(3)) != cur) or m.group(0), t)
 
 
 def _parse(word, pos=None):
@@ -415,20 +485,31 @@ def _numbers(t):
             case = noun_p.tag.case
         gender = noun_p.tag.gender if noun_p else None
 
-        if frac is None and 1900 <= n <= 2100 and w1.lower().startswith(("год", "гг")):
+        year_noun = None
+        if frac is None and 1900 <= n <= 2100 and w1.lower() in ("год", "года", "году") and prev in _YEAR_PREP:
+            # «год» одинаков в им./вин. — падеж задаёт предлог; слово «год» тоже согласуем
+            ycase = _YEAR_PREP[prev]
+            spoken, targets = _ordinal(n, ycase, "masc"), []
+            year_noun = (nxt[0][1], nxt[0][2], _YEAR_FORM[ycase]) if w1.lower() == "год" else None
+        elif frac is None and 1900 <= n <= 2100 and w1.lower().startswith(("год", "гг")):
             yp = _parse(w1, ("NOUN",))
             ycase = yp.tag.case if yp else "nomn"
+            if prev.startswith(("месяц", "квартал", "полугод", "мес", "кв")) and w1.lower() == "год":
+                ycase = "gent"                    # «за девять месяцев две тысячи двадцать шестого года»
+                year_noun = (nxt[0][1], nxt[0][2], "года")
             if ycase == "nomn" and (prev in _ACC_PREPS or prev in _PREP_CASE):
                 ycase = "accs" if prev in _ACC_PREPS else _PREP_CASE[prev]
             spoken, targets = _ordinal(n, ycase, "masc"), []
         elif frac is None and 1 <= n <= 31 and w1.lower() in _MONTHS:
-            spoken, targets = _ordinal(n, "accs" if prev in ("на", "в") else "gent", "neut"), []
+            spoken, targets = _ordinal(n, "accs" if prev in ("на", "в", "по") else "gent", "neut"), []
         elif frac:
             spoken = _decimal(n, frac, case)
         else:
             spoken = _cardinal(n, case, gender)
 
         out.append(t[pos:m.start()]); out.append(spoken); pos = m.end()
+        if year_noun:
+            out.append(t[pos:year_noun[0]]); out.append(year_noun[2]); pos = year_noun[1]
         for word, a, b in targets:
             out.append(t[pos:a])
             agreed = _agree(word, n, case, bool(frac), gender)
@@ -446,6 +527,7 @@ def normalize(text: str) -> str:
     t = _decaps(t)
     t = _latin(t)
     t = _expand_abbr(t)
+    t = _dates(t)
     t = _units(t)
     t = _numbers(t)
     t = re.sub(r"[A-Za-z]+", lambda m: _spell(m.group(0)), t)

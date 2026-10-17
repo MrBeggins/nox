@@ -65,12 +65,21 @@
         voiceSpeed = v
         try { await invoke("tts_speed_set", { v }) } catch (e) { console.error(e) }
     }
+    // громкость речи 10…100% (движок умножает звук перед отдачей; другие звуки не меняются)
+    let voiceVolume = 1
+    async function loadVoiceVolume() {
+        try { const s = JSON.parse(await invoke<string>("tts_volume_get")); voiceVolume = s.value || 1 } catch { /* tts offline */ }
+    }
+    async function setVoiceVolume(v: number) {
+        voiceVolume = v
+        try { await invoke("tts_volume_set", { v }) } catch (e) { console.error(e) }
+    }
 
     $: nextItem = agenda.find(a => !a.done && (a.kind === "evt" || a.kind === "rem")) || agenda.find(a => !a.done)
     $: newsTopics = (filter.tickers?.length || 0) + (filter.phrases?.length || 0)
 
     let timer: ReturnType<typeof setInterval>
-    onMount(() => { loadLayout(); refresh(); loadVoiceSpeed(); timer = setInterval(refresh, 5000) })
+    onMount(() => { loadLayout(); refresh(); loadVoiceSpeed(); loadVoiceVolume(); timer = setInterval(refresh, 5000) })
     onDestroy(() => clearInterval(timer))
 </script>
 
@@ -130,6 +139,12 @@
                         {#if voiceSpeed}скорость {voiceSpeed.toFixed(2)}× <button class="gear" on:click={() => setVoiceSpeed(0)}>сброс (динамич.)</button>
                         {:else}динамическая скорость (потяни, чтобы зафиксировать){/if}
                     </div>
+                    <input class="rng" type="range" min="0.1" max="1" step="0.05"
+                        value={voiceVolume}
+                        style="--p:{Math.round(((voiceVolume - 0.1) / 0.9) * 100)}%"
+                        on:change={(e) => setVoiceVolume(+e.currentTarget.value)}
+                        on:input={(e) => voiceVolume = +e.currentTarget.value} />
+                    <div class="mut">громкость {Math.round(voiceVolume * 100)}%</div>
 
                 {:else if id === "portfolio"}
                     <div class="big">—</div>

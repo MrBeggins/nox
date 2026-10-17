@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Голос Nox на XTTS v2 (coqui-tts): КЛОНИРУЕТ голос по образцу ref_jarvis_og.wav,
-но заметно стабильнее F5 (меньше «белиберды»). Тот же HTTP-API (порт 8123) —
-jarvis-app работает без изменений.
+Голос Nox на XTTS v2 (coqui-tts): КЛОНИРУЕТ голос Джарвиса по образцу «Jarvis New»
+(resources/sound/voices/jarvis-remaster/ru, 25 фраз ≈ 59 с → voice_ref/new_ru/*.wav; латенты — xtts_voice_new.pt),
+после синтеза — эквалайзер-слепок под образец (nox_voicefx). Тот же HTTP-API (порт 8123) —
+jarvis-app работает без изменений. Прежний образец OG — REF_AUDIO_OG (откат: удалить xtts_voice_new.pt
+и папку voice_ref/new_ru).
 Запускать интерпретатором ИЗОЛИРОВАННОГО окружения:
    C:\\jarvis-voice\\.venv-xtts\\Scripts\\python.exe tts_xtts_server.py
 
@@ -33,9 +35,14 @@ except Exception:
 
 MODEL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
                          "tts", "tts_models--multilingual--multi-dataset--xtts_v2")
-REF_AUDIO  = r"C:\jarvis-voice\ref_jarvis_og.wav"
+REF_AUDIO_OG = r"C:\jarvis-voice\ref_jarvis_og.wav"
+REF_DIR    = r"C:\jarvis-voice\voice_ref\new_ru"        # фразы «Jarvis New», 24 кГц
+VOICE_LAT  = r"C:\jarvis-voice\xtts_voice_new.pt"       # готовые латенты (gpt_cond_len=12, max_ref_length=30)
+REF_AUDIO  = VOICE_LAT if os.path.exists(VOICE_LAT) else REF_AUDIO_OG
 LANG       = "ru"
-_SPEED_FILE = r"C:\jarvis-voice\tts_speed.txt"
+TEMPERATURE = 0.5          # замеры 2026-10-17: 0.5 стабильнее 0.65 при той же похожести
+# Своя скорость XTTS: общий tts_speed.txt (1.5 у Silero) смазывает слова клона
+_SPEED_FILE = r"C:\jarvis-voice\tts_xtts_speed.txt"
 
 _device = "cuda" if torch.cuda.is_available() else "cpu"
 _model = None
@@ -67,8 +74,19 @@ def _load_once():
     t0 = time.time()
     print(f"[init] загружаю XTTS v2 на {_device} из {MODEL_DIR}...")
     m = load_xtts()
-    with torch.inference_mode():
-        lat = m.get_conditioning_latents(audio_path=[REF_AUDIO])
+    lat = None
+    if os.path.exists(VOICE_LAT):
+        try:
+            d = torch.load(VOICE_LAT)
+            lat = (d["gpt"].to(_device), d["spk"].to(_device))
+        except Exception as e:
+            print("[init] латенты не прочитались:", e)
+    if lat is None:
+        import glob
+        refs = sorted(glob.glob(os.path.join(REF_DIR, "*.wav"))) or [REF_AUDIO_OG]
+        with torch.inference_mode():
+            lat = m.get_conditioning_latents(audio_path=refs, gpt_cond_len=12, max_ref_length=30,
+                                             sound_norm_refs=False)
     _model, _latents = m, lat
     print(f"[ready] XTTS v2 готов за {time.time()-t0:.0f}с, голос из", os.path.basename(REF_AUDIO))
 
@@ -85,6 +103,13 @@ def _normalize(text):
             pass
     return (text or "").strip() or "."
 
+def _volume():
+    try:
+        import nox_volume
+        return nox_volume.get()
+    except Exception:
+        return 1.0
+
 def _load_user_speed():
     try:
         v = float(open(_SPEED_FILE, encoding="utf-8").read().strip())
@@ -100,12 +125,29 @@ def synth(text: str, speed: float = 1.0) -> bytes:
         speed = _user_speed
     speed = max(0.7, min(1.5, float(speed)))
     gpt, spk = _latents
+    # XTTS дописывает лишний слог в конце фразы («…с начала дня Тотина») в 7 из 18 случаев; с многоточием
+    # в конце — 0 из 18, и на фразах из нескольких предложений вреда нет (Whisper-проверка 2026-10-17)
+    norm = norm.rstrip()
+    if norm.endswith("."):
+        norm = norm.rstrip(".") + "..."
+    elif norm and norm[-1] not in "!?…":
+        norm += "..."
     with _lock, torch.inference_mode():
-        out = _model.inference(norm, LANG, gpt, spk, temperature=0.65,
+        out = _model.inference(norm, LANG, gpt, spk, temperature=TEMPERATURE,
                                speed=speed, enable_text_splitting=True)
     wav = np.asarray(out["wav"], dtype=np.float32).reshape(-1)
+    try:
+        import nox_voicefx                                # эквалайзер-слепок под образец New
+        wav = nox_voicefx.process(wav, 24000)
+    except Exception as e:
+        print("[voicefx]", e)
+    # XTTS начинает фразу прямо с первого отсчёта — первая согласная срезается («Полюс» → «Олюс»):
+    # 0.12 с тишины + 3 мс нарастания (проверка Whisper: 28/32 → 30/32 верных начал)
+    fade = min(len(wav), 72)
+    wav[:fade] *= np.linspace(0, 1, fade, dtype=np.float32)
+    wav = np.concatenate([np.zeros(int(0.12 * 24000), np.float32), wav])
     peak = float(np.max(np.abs(wav))) or 1.0
-    wav = wav / peak * 0.95
+    wav = wav / peak * 0.95 * _volume()          # громкость — ползунок в окне
     buf = io.BytesIO()
     sf.write(buf, wav, 24000, format="WAV", subtype="PCM_16")   # XTTS отдаёт 24 кГц
     return buf.getvalue()
@@ -140,6 +182,15 @@ def health():
 @app.get("/speed")
 def get_speed():
     return {"value": _user_speed or 0.0}
+
+@app.get("/volume")
+def get_volume():
+    return {"value": _volume()}
+
+@app.get("/set_volume")
+def set_volume(v: float = 1.0):
+    import nox_volume
+    return {"value": nox_volume.set(v)}
 
 @app.get("/set_speed")
 def set_speed(v: float = 0.0):

@@ -6,7 +6,7 @@
 import json, os, sys
 
 KEY_FILE = r"C:\jarvis-voice\apimira_key.txt"
-DB       = r"C:\Users\Дамир\AppData\Roaming\com.priler.jarvis\app.db"
+DB       = os.path.join(os.environ.get("APPDATA") or os.path.expanduser(r"~\AppData\Roaming"), "com.priler.jarvis", "app.db")
 URL      = "https://apimira.com/v1"
 
 def main():

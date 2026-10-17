@@ -20,6 +20,7 @@
         { path: "/",          name: "Пульс",          icon: "◉" },
         { path: "/models",    name: "Мозг",           icon: "✦" },
         { path: "/watchers",  name: "Наблюдатели",    icon: "⊙" },
+        { path: "/memory",    name: "Память",         icon: "◈" },
         { path: "/calendar",  name: "Календарь",      icon: "🗓" },
         { path: "/widgets",   name: "Сетка виджетов", icon: "▦" },
         { path: "/settings",  name: "Настройки",      icon: "⚙" },

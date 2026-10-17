@@ -149,6 +149,15 @@ fn main() {
             tauri_commands::watch_show,
             tauri_commands::watch_dry,
             tauri_commands::cscalp_layout,
+            tauri_commands::arrows_get,
+            tauri_commands::arrows_save,
+            tauri_commands::arrow_fire,
+            tauri_commands::arrow_dry,
+            tauri_commands::arrow_layout,
+            tauri_commands::copy_get,
+            tauri_commands::copy_save,
+            tauri_commands::memory_get,
+            tauri_commands::memory_save,
 
             // Выбор голоса (движок + диктор)
             tauri_commands::voice_list,
@@ -166,6 +175,8 @@ fn main() {
             tauri_commands::magellan_pulse,
             tauri_commands::tts_speed_get,
             tauri_commands::tts_speed_set,
+            tauri_commands::tts_volume_get,
+            tauri_commands::tts_volume_set,
             tauri_commands::profile_get,
             tauri_commands::profile_save,
 

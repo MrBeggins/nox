@@ -1,9 +1,10 @@
 <script lang="ts">
-    import { onMount } from "svelte"
+    import { onMount, tick } from "svelte"
     import { invoke } from "@tauri-apps/api/core"
     import HDivider from "@/components/elements/HDivider.svelte"
     import InfoDot from "@/components/elements/InfoDot.svelte"
     import ScenariosPanel from "@/components/ScenariosPanel.svelte"
+    import ArrowsPanel from "@/components/ArrowsPanel.svelte"
 
     // venue "cscalp" — стакан CScalp по тикеру (горячая клавиша, только по рынку, объём — в стакане)
     type Order = { ticker: string, n: number, side: string, lots?: number | null, price?: number | null, venue?: string }
@@ -204,6 +205,10 @@
         } catch (e) { flash("Не удалось сохранить") }
     }
 
+    // «Изменить» заполняет форму наверху; страница прокручивается внутри своего блока, а не окна, —
+    // поэтому к форме подводим через scrollIntoView (window.scrollTo ничего не двигал: «кнопка не работает»)
+    let formTop: HTMLElement
+
     function edit(w: Watcher) {
         ed = { id: w.id, name: w.name, keywords: w.keywords.join(" "), source: w.source || "all", brain: w.brain || "",
                scenario_id: w.scenario_id || "", until: w.until || "", once: w.once, tab: w.tab || "",
@@ -211,7 +216,7 @@
                kind: w.kind || "", bank: w.bank || "cbr", date: w.date || "", from: w.from || "",
                rate_now: (w.rate_now ?? "") as any, quiet: w.quiet ?? 5, strict: w.strict !== false }
         scanned = []
-        window.scrollTo({ top: 0, behavior: "smooth" })
+        tick().then(() => formTop?.scrollIntoView({ behavior: "smooth", block: "start" }))
     }
 
     // ---- действия с наблюдателем
@@ -238,7 +243,7 @@
 
     <HDivider />
 
-    <h3>{ed.id ? `Изменить «${ed.name}»` : "Новый наблюдатель"}</h3>
+    <h3 bind:this={formTop}>{ed.id ? `Изменить «${ed.name}»` : "Новый наблюдатель"}</h3>
     <label>Опишите одной строкой<InfoDot text="Обычными словами: за чем следить и что делать при каком значении. Нокс заполнит название, ключевые слова, время, вкладку и ветки с заявками (тикеры, фьючерсы, купить/продать, лоты, цену). Ничего не сохраняется, пока вы не нажмёте «Создать»." /></label>
     <div class="row-actions">
         <input class="brief" bind:value={brief} placeholder="дивиденды Лукойла на вкладке Нокс: больше 600 — купи 1 лот по рынку; от 480 до 600 — купи фьючерс Лукойла 12; меньше 480 — продай 1 лот"
@@ -446,6 +451,11 @@
         {/each}
         {#if watchers.length === 0}<p class="hint">Пока нет наблюдателей.</p>{/if}
     </div>
+
+    <HDivider />
+
+    <h3>Стрелки на оверлее — ручная покупка и продажа</h3>
+    <ArrowsPanel />
 
     <HDivider />
 

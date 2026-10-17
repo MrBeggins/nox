@@ -15,6 +15,13 @@ static WAKE_RECOGNIZER: OnceCell<Mutex<Recognizer>> = OnceCell::new();
 // могло вообще не срабатывать. Тут распознаём свободно и фаззи-сверяем в listener.
 static FREE_WAKE_RECOGNIZER: OnceCell<Mutex<Recognizer>> = OnceCell::new();
 static SPEECH_RECOGNIZER: OnceCell<Mutex<Recognizer>> = OnceCell::new();
+// Vosk прямо сейчас слышит слова (непустой частичный результат) — человек говорит,
+// даже если готового куска фразы ещё нет. Шум без слов сюда не попадает.
+static SPEECH_HEARD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn speech_heard() -> bool {
+    SPEECH_HEARD.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 pub fn init_vosk() -> Result<(), String> {
     if VOSK_MODEL.get().is_some() {
@@ -110,9 +117,15 @@ pub fn recognize_speech(data: &[i16]) -> Option<String> {
     
     match recognizer.accept_waveform(data) {
         Ok(DecodingState::Finalized) => {
+            SPEECH_HEARD.store(false, std::sync::atomic::Ordering::Relaxed);
             recognizer.result()
                 .multiple()
                 .and_then(|m| m.alternatives.first().map(|a| a.text.to_string()))
+        }
+        Ok(DecodingState::Running) => {
+            let heard = !recognizer.partial_result().partial.trim().is_empty();
+            SPEECH_HEARD.store(heard, std::sync::atomic::Ordering::Relaxed);
+            None
         }
         _ => None,
     }
@@ -136,6 +149,7 @@ pub fn reset_speech_recognizer() {
     if let Some(recognizer) = SPEECH_RECOGNIZER.get() {
         recognizer.lock().reset();
     }
+    SPEECH_HEARD.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn reset_wake_recognizer() {

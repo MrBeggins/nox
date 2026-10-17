@@ -6,7 +6,11 @@ API:     POST /tts  {"text": "...", "speed": 1.2}  -> audio/wav
 import os, io, time, threading
 
 # ffmpeg.exe на PATH (для разовой транскрипции референса при старте)
-os.environ["PATH"] = r"C:\Users\Дамир\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.1-full_build\bin" + os.pathsep + os.environ.get("PATH", "")
+import glob as _glob   # ffmpeg из winget (Gyan.FFmpeg) — в профиле текущего пользователя
+_ff = sorted(_glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Packages",
+                                     "Gyan.FFmpeg*", "ffmpeg-*", "bin")))
+if _ff:
+    os.environ["PATH"] = _ff[-1] + os.pathsep + os.environ.get("PATH", "")
 
 # обход torchcodec: torchaudio.load через soundfile
 import torch, torchaudio, soundfile as sf, numpy as np
@@ -31,10 +35,17 @@ _acc = RUAccent()
 _acc.load(omograph_model_size="turbo", use_dictionary=True, tiny_mode=False)
 
 print("[init] F5-TTS (RU) на GPU...")
-_tts = F5TTS(model="F5TTS_v1_Base", ckpt_file=MODEL_CKPT, vocab_file=VOCAB, device="cuda")
+# вокодер: из папки установщика (models\vocos-mel-24khz), иначе — из кэша HuggingFace
+_VOCOS = r"C:\jarvis-voice\models\vocos-mel-24khz"
+_tts = F5TTS(model="F5TTS_v1_Base", ckpt_file=MODEL_CKPT, vocab_file=VOCAB, device="cuda",
+             vocoder_local_path=_VOCOS if os.path.isfile(os.path.join(_VOCOS, "pytorch_model.bin")) else None)
 
-print("[init] транскрипция референса (один раз)...")
-REF_TEXT = _tts.transcribe(REF_AUDIO)
+# текст образца: готовая расшифровка рядом с wav (без Whisper — он качает ~1,6 ГБ); нет файла — распознаём
+_REF_TXT = os.path.splitext(REF_AUDIO)[0] + ".txt"
+REF_TEXT = open(_REF_TXT, encoding="utf-8").read().strip() if os.path.exists(_REF_TXT) else ""
+if not REF_TEXT:
+    print("[init] транскрипция референса (один раз)...")
+    REF_TEXT = _tts.transcribe(REF_AUDIO)
 print("[init] ref_text =", REF_TEXT)
 
 _lock = threading.Lock()   # F5 не потокобезопасен -> сериализуем запросы
@@ -162,6 +173,13 @@ def _accent(s: str) -> str:
     return g
 
 _SPEED_FILE = r"C:\jarvis-voice\tts_speed.txt"
+def _volume():
+    try:
+        import nox_volume
+        return nox_volume.get()
+    except Exception:
+        return 1.0
+
 def _load_user_speed():
     try:
         v = float(open(_SPEED_FILE, encoding="utf-8").read().strip())
@@ -204,7 +222,7 @@ def synth(text: str, speed: float = SPEED, nfe: int = NFE) -> bytes:
             parts.append(np.zeros(int(sr * 0.10), dtype=np.float32))  # пауза между кусками
     wav = np.concatenate(parts) if parts else np.zeros(1, dtype=np.float32)
     peak = float(np.max(np.abs(wav))) or 1.0
-    wav = wav / peak * 0.95
+    wav = wav / peak * 0.95 * _volume()          # громкость — ползунок в окне
     buf = io.BytesIO()
     sf.write(buf, wav, sr, format="WAV", subtype="PCM_16")
     return buf.getvalue()
@@ -227,6 +245,15 @@ def health():
 def get_speed():
     # 0 = «динамическая» (не задана пользователем)
     return {"value": _user_speed or 0.0}
+
+@app.get("/volume")
+def get_volume():
+    return {"value": _volume()}
+
+@app.get("/set_volume")
+def set_volume(v: float = 1.0):
+    import nox_volume
+    return {"value": nox_volume.set(v)}
 
 @app.get("/set_speed")
 def set_speed(v: float = 0.0):

@@ -96,7 +96,7 @@ def start_capture():
 _DEF = {"scenarios": []}
 
 # общий конфиг GUI (app.db) — чтобы ключ/URL/модель OpenAI задавались в ОДНОМ месте
-_APPDB = r"C:\Users\Дамир\AppData\Roaming\com.priler.jarvis\app.db"
+_APPDB = os.path.join(os.environ.get("APPDATA") or os.path.expanduser(r"~\AppData\Roaming"), "com.priler.jarvis", "app.db")
 def _appdb():
     try:
         return json.loads(open(_APPDB, "rb").read().decode("utf-8-sig"))
@@ -271,10 +271,10 @@ def _sources(racing):
         return [oll]
     return [oll, oai] if racing else [oai, oll]
 
-def _llm(system, user, max_tokens=120):
-    """В окне события — ГОНКА источников (первый валидный ответ побеждает, остальные логируются).
+def _llm(system, user, max_tokens=120, race=False):
+    """В окне события (или race=True) — ГОНКА источников (первый валидный ответ побеждает, остальные логируются).
     Вне окна — выбранный мозг с откатом на Ollama."""
-    racing = time.time() < _race_until
+    racing = race or time.time() < _race_until
     srcs = _sources(racing)
     if not racing or len(srcs) <= 1:
         for name, fn in srcs:
@@ -486,21 +486,87 @@ def event_confirmed(ev):
     return bool(ev) and ev.get("type") == ev.get("kw_type")
 
 
-def extract_event(text):
+# Отчёт о ходе выкупа (Смартлаб: «Хэдхантер- BUYBACK: 28.09.2026 - 09.10.2026», в теле «Объем: 690.00 млн.
+# рублей … Количество приобретенных акций: 245 550 шт»). Мозг клал в «размер» период, и голос нёс
+# «Выкуп Хэдхантер: двадцать восемь целых девять сотых…». Разбор правилами, без мозга (облако бывает 9 с).
+_BB_SHARES = re.compile(r"(?:количество приобретенн\w* акций|приобрел\w*|выкупил\w*)\D{0,25}?"
+                        r"(\d{1,3}(?:[ \u00a0]\d{3})+|\d+)\s*(?:шт|акци)", re.I)
+_BB_AMOUNT = re.compile(r"(?:объ[её]м\s*:|на сумму)\s*(\d[\d \u00a0]*(?:[.,]\d+)?)\s*(млрд|млн|тыс)\.?\s*(руб\w*|₽|долл\w*|\$)",
+                        re.I)
+_BB_PERIOD = re.compile(r"\d{1,2}\.\d{1,2}\.\d{4}\s*[-–—]\s*\d{1,2}\.\d{1,2}\.\d{4}")
+_BB_NAME = re.compile(r"^\s*(.+?)\s*[-–—]\s*buy-?back|buy-?back\s+([^:\d]+?)\s*:", re.I)
+_BB_SUBJ = re.compile(r"^\s*([А-ЯЁA-Z][^:.,;]{1,40}?)\s+(?:выкупил|приобрел)", re.I)   # «Сбербанк выкупил 1 500 000 акций…»
+_DATES_ONLY = re.compile(r"\d{1,2}\.\d{1,2}(?:\.\d{2,4})?")
+
+
+def _buyback_report(text, body=""):
+    """{type: выкуп, ticker, value: «куплено N акций на X млн рублей», period} или None — не отчёт."""
+    full = f"{text} {body}"
+    sh = _BB_SHARES.search(full)
+    if not sh:
+        return None
+    nm = _BB_NAME.search(text) or _BB_NAME.search(full) or _BB_SUBJ.search(text)
+    shares = re.sub(r"[  ]+", " ", sh.group(1))
+    val = f"куплено {shares} акций"
+    am = _BB_AMOUNT.search(full)
+    if am:
+        num, unit = float(re.sub(r"[  ]", "", am.group(1)).replace(",", ".")), am.group(2).lower()
+        if unit == "млн" and num >= 1000:   # «1 250,5 млн» -> «1,25 млрд» — короче на слух
+            num, unit = round(num / 1000, 2), "млрд"
+        val += f" на {('%g' % round(num, 2)).replace('.', ',')} {unit} {am.group(3)}"
+    per = _BB_PERIOD.search(full)
+    return {"type": "выкуп", "ticker": (next(g for g in nm.groups() if g).strip() if nm else ""), "value": val,
+            "period": per.group(0) if per else "", "report": True, "kw_type": "выкуп"}
+
+
+def extract_event(text, body=""):
     """Если в новости есть ключевое событие — вернуть {type,ticker,value,kw_type}, иначе None."""
     typ = event_type(text)
     if not typ:
         return None
-    j = _json_from(_llm(_EXTRACT_NEWS_SYS, text, max_tokens=90)) or {}
+    rep = _buyback_report(text, body) if typ == "выкуп" else None
+    if rep:
+        _log(f"СОБЫТИЕ выкуп (отчёт, правила): {rep['ticker'] or '?'} {rep['value']} {rep['period']} | {text[:60]}")
+        return rep
+    # корпсобытие читается голосом — облако и Ollama параллельно, кто первый (облако бывало 4–9 с и таймауты)
+    j = _json_from(_llm(_EXTRACT_NEWS_SYS, text, max_tokens=90, race=True)) or {}
+    value = (j.get("value") or "").strip()
+    if not re.search(r"\d", _DATES_ONLY.sub("", value)) and not re.search(r"[а-яa-z]{3}", _DATES_ONLY.sub("", value).lower()):
+        value = ""   # только даты/период — это не размер
     out = {"type": j.get("type") or typ, "ticker": (j.get("ticker") or "").strip(),
-           "value": (j.get("value") or "").strip(), "kw_type": typ}
+           "value": value, "kw_type": typ}
     _log(f"СОБЫТИЕ {out['type']}: тикер={out['ticker'] or '?'} размер={out['value'] or '?'} | {text[:60]}")
     return out
+
+# Оговорки: новость про событие, но НЕ объявление о нём — «решение о дивидендах пока не принято»,
+# «рекомендовал не выплачивать», «может выплатить», прогнозы аналитиков. Шаблон «Дивиденды Россети.»
+# переворачивал смысл — такие новости читаем заголовком целиком.
+HEDGE_RX = re.compile(r"не принят|пока не|еще не|ещё не|морато|не будет|не буд[уе]т|не план|отказ|отмен|"
+                      r"не выпла|не рекоменд|не направ|не распредел|без дивиденд|"
+                      r"\bмож(ет|ут)\b|возможн|вероятн|допуска|ожида|прогноз|аналитик|мнение|оцен[ия]|"
+                      r"рассмотрит|рассмотрят|обсуд|планир|намерен|предлож|не исключ", re.I)
+# Размер события — сумма/количество, а не «впервые за три года», «0,7%» (дивгэп) или период
+_AMOUNT_RX = re.compile(r"\d[\d\s\u00a0]*(?:[.,]\d+)?\s*(?:руб|₽|коп|\$|долл|евро|юан|млрд|млн|тыс|акци|шт)", re.I)
+
+
+def event_speakable(ev, text):
+    """Можно ли сказать коротким шаблоном («Дивиденды Новатэк: 35 руб.»): чёткое событие без оговорок
+    и с суммой (дефолт — без суммы). Иначе — читать заголовок целиком."""
+    if not ev:
+        return False
+    if ev.get("report"):
+        return True
+    if HEDGE_RX.search((text or "").lower().replace("ё", "е")):
+        return False
+    return ev.get("type") == "дефолт" or bool(_AMOUNT_RX.search(ev.get("value") or ""))
+
 
 def speak_event(ev):
     t, tk, v = ev.get("type"), ev.get("ticker") or "", ev.get("value") or ""
     if t == "дефолт":
         return f"Внимание: дефолт, {tk}.".strip()
+    if ev.get("report"):   # отчёт о выкупе: что уже куплено и за какой период
+        return f"{tk}: отчёт о выкупе — {v}{', ' + ev['period'] if ev.get('period') else ''}.".lstrip(": ")
     head = {"дивиденд": "Дивиденды", "оферта": "Оферта", "допэмиссия": "Допэмиссия",
             "выкуп": "Выкуп"}.get(t, "Событие")
     return f"{head} {tk}: {v}.".replace(" :", ":").strip() if v else f"{head} {tk}.".strip()

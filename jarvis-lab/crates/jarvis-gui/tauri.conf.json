@@ -29,7 +29,7 @@
         "url": "index.html?overlay=1",
         "title": "Nox Overlay",
         "width": 210,
-        "height": 200,
+        "height": 250,
         "transparent": true,
         "decorations": false,
         "alwaysOnTop": true,
