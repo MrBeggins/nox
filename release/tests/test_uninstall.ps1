@@ -9,9 +9,12 @@ $un = "$R\jarvis-lab\unins000.exe"
 if (-not (Test-Path $un)) { Say "нет деинсталлятора $un"; exit 2 }
 Say "удаление: $un"
 Start-Process $un -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' | Out-Null
-# деинсталлятор Inno перезапускает себя из %TEMP% — ждём, пока исчезнет запись в «Приложениях»
-for ($i = 0; $i -lt 120 -and (Test-Path $key); $i++) { Start-Sleep -Seconds 2 }
+# деинсталлятор Inno перезапускает себя из %TEMP% (_iu*.tmp) — ждём, пока он не завершится совсем
 Start-Sleep -Seconds 3
+for ($i = 0; $i -lt 150; $i++) {
+    if (-not (Get-Process | Where-Object { $_.Name -like "_iu*" -or $_.Name -like "unins*" })) { break }
+    Start-Sleep -Seconds 2
+}
 $left = @()
 if (Test-Path $R) { $left = @(Get-ChildItem $R -Recurse -Force -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($R.Length + 1) }) }
 Say ("запись в «Приложениях»: {0}" -f $(if (Test-Path $key) { "ОСТАЛАСЬ" } else { "удалена" }))

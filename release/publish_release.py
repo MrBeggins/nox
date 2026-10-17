@@ -38,16 +38,21 @@ def api(method, url, tok, body=None):
     req = urllib.request.Request(url, data=data, method=method, headers={
         "Authorization": "token " + tok, "Accept": "application/vnd.github+json",
         "User-Agent": "nox-release", "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            raw = r.read()
-            return r.status, (json.loads(raw) if raw else None)
-    except urllib.error.HTTPError as e:
-        raw = e.read()
+    for attempt in range(6):
         try:
-            return e.code, json.loads(raw)
-        except Exception:
-            return e.code, raw.decode("utf-8", "replace")
+            with urllib.request.urlopen(req, timeout=120) as r:
+                raw = r.read()
+                return r.status, (json.loads(raw) if raw else None)
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            try:
+                return e.code, json.loads(raw)
+            except Exception:
+                return e.code, raw.decode("utf-8", "replace")
+        except (urllib.error.URLError, OSError) as e:      # таймаут/обрыв сети — повторить
+            log(f"сеть: {e} — повтор {attempt + 1}")
+            time.sleep(10 * (attempt + 1))
+    sys.exit("GitHub API недоступен")
 
 
 def upload(tok, release, path, ctype):
